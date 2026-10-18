@@ -24,6 +24,7 @@ import {
   CanvasAnnotation,
   LayerAction,
   TACTICAL_STAMPS,
+  COMMON_SHAPE_ITEMS,
 } from '../types/crm.ts';
 import { useLanguage } from '../context/LanguageContext.tsx';
 
@@ -135,24 +136,26 @@ export const LayerManagerPanel: React.FC<LayerManagerPanelProps> = ({
       let subtitle = `${a.width}×${a.height}px · ${a.strokeWidth}px`;
       if (a.kind === 'highlighter') {
         title = language === 'zh' ? '荧光马克笔标注' : 'Highlighter Mark';
+      } else if (a.kind === 'text') {
+        title = a.text ? a.text.slice(0, 14) : language === 'zh' ? '文本框批注' : 'Text Label';
+        subtitle = `${language === 'zh' ? '文本' : 'Text'} · ${a.width}×${a.height}px`;
       } else if (a.kind === 'shape') {
-        const shapeLabel =
-          a.shapeType === 'ellipse'
-            ? language === 'zh'
-              ? '一笔成型圆框'
-              : 'Smart Circle'
-            : a.shapeType === 'rect'
-            ? language === 'zh'
-              ? '一笔成型矩形框'
-              : 'Smart Rectangle'
-            : a.shapeType === 'arrow'
-            ? language === 'zh'
-              ? '战术指示箭头'
-              : 'Tactical Arrow'
-            : language === 'zh'
-            ? '战术直线'
-            : 'Straight Line';
-        title = shapeLabel;
+        const matched = COMMON_SHAPE_ITEMS.find((s) => s.key === a.shapeType);
+        const shapeLabel = matched
+          ? language === 'zh'
+            ? matched.labelZh
+            : matched.labelEn
+          : a.shapeType === 'arrow'
+          ? language === 'zh'
+            ? '战术指示箭头'
+            : 'Tactical Arrow'
+          : language === 'zh'
+          ? '战术直线'
+          : 'Straight Line';
+        title = a.text ? `${shapeLabel}: ${a.text.slice(0, 10)}` : shapeLabel;
+        if (a.rotation) {
+          subtitle += ` · ${Math.round(a.rotation)}°`;
+        }
       } else if (a.kind === 'sticky') {
         const stampMeta = TACTICAL_STAMPS.find((s) => s.key === a.stamp) || TACTICAL_STAMPS[0];
         title = a.text ? a.text.slice(0, 14) : language === 'zh' ? '作战便签贴纸' : 'Tactical Sticky';

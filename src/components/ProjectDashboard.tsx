@@ -16,7 +16,6 @@ import {
   Calendar,
   Trash2,
   X,
-  Compass,
 } from 'lucide-react';
 import {
   ProjectMap,
@@ -52,7 +51,6 @@ interface ProjectDashboardProps {
   onEditPerson: (person: Person) => void;
   onOpenNewPerson: () => void;
   onOpenTimeline: (person: Person) => void;
-  onOpenInfluencePath: () => void;
 }
 
 export const ProjectDashboard: React.FC<ProjectDashboardProps> = ({
@@ -69,7 +67,6 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = ({
   onEditPerson,
   onOpenNewPerson,
   onOpenTimeline,
-  onOpenInfluencePath,
 }) => {
   const { t, language } = useLanguage();
   const [searchQuery, setSearchQuery] = useState('');
@@ -633,14 +630,6 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = ({
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onOpenInfluencePath}
-                className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-2xs"
-              >
-                <Compass className="w-3.5 h-3.5 text-indigo-600" strokeWidth={1.5} />
-                <span>{t('pathFindingBtn')}</span>
-              </button>
               <button
                 type="button"
                 onClick={onOpenNewPerson}

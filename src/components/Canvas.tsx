@@ -48,6 +48,13 @@ import {
   Eraser,
   Scissors,
   Zap,
+  MoveRight,
+  MoveHorizontal,
+  Minus,
+  Shapes,
+  Type,
+  RotateCw,
+  ChevronDown,
 } from 'lucide-react';
 import {
   Person,
@@ -63,7 +70,12 @@ import {
   RelationshipStage,
   STAGE_LIST,
   CARD_COLORS,
+  SmartShapeType,
+  COMMON_SHAPE_ITEMS,
+  CameraBookmark,
 } from '../types/crm.ts';
+import type { SnapshotDiffResult } from '../utils/snapshot-diff.ts';
+import { PresentationHud } from './canvas/PresentationHud.tsx';
 import {
   CARD_WIDTH,
   CARD_HEIGHT,
@@ -83,6 +95,12 @@ import {
   sampleRelationshipPoints,
   isPolylineIntersectingPolygon,
   isPointNearAnnotation,
+  cleanStrokeEndpoints,
+  computeNaturalArrowhead,
+  getBoxCornerAndEdgePoints,
+  snapPointToBoxPerimeter,
+  computeStickyCalloutGeometry,
+  buildCommonShapeSvgPath,
 } from '../utils/graph-math.ts';
 import {
   BACKGROUND_STYLES,
@@ -93,32 +111,28 @@ import {
   BackgroundStyleId,
   LineStyleId,
   CardStyleId,
+  BackgroundStyleConfig,
+  LineStyleConfig,
+  CardStyleConfig,
 } from '../types/styles.ts';
 import { calculateRelationshipStrength } from '../utils/relationship-strength.ts';
-import { AlignmentType } from '../utils/graph-algorithms.ts';
+import {
+  AlignmentType,
+  SmartGuideLine,
+  computeSmartSnapGuides,
+} from '../utils/graph-algorithms.ts';
 import { LayerManagerPanel, LayerItemKind } from './LayerManagerPanel.tsx';
 import { useLanguage } from '../context/LanguageContext.tsx';
 import { loadToolbarPosition, saveToolbarPosition } from '../utils/storage.ts';
-
-interface ContextMenuState {
-  x: number;
-  y: number;
-  canvasX: number;
-  canvasY: number;
-  targetType: 'canvas' | 'person' | 'frame' | 'relationship' | 'annotation';
-  targetId?: string;
-}
-
-const PEN_TACTICAL_COLORS = [
-  { name: '战术红', value: '#EF4444' },
-  { name: '算力蓝', value: '#2563EB' },
-  { name: '翡翠绿', value: '#10B981' },
-  { name: '琥珀黄', value: '#F59E0B' },
-  { name: '霓虹紫', value: '#8B5CF6' },
-  { name: '极客黑', value: '#0F172A' },
-];
-
-const PEN_STROKE_WIDTHS = [2, 4, 6, 12];
+import { ContextMenuState } from './canvas/canvas-constants.ts';
+import { SmartGuidesLayer } from './canvas/SmartGuidesLayer.tsx';
+import { CanvasFloatingToolbar } from './canvas/CanvasFloatingToolbar.tsx';
+import { CanvasPropertyBar } from './canvas/CanvasPropertyBar.tsx';
+import { CanvasContextMenu } from './canvas/CanvasContextMenu.tsx';
+import {
+  StickyNoteInlineEditor,
+  ShapeTextInlineEditor,
+} from './canvas/InlineAnnotationEditor.tsx';
 
 interface CanvasProps {
   people: Person[];
@@ -145,6 +159,12 @@ interface CanvasProps {
     annotationMoves?: { id: string; x: number; y: number }[]
   ) => void;
   onAlignPeople: (personIds: string[], alignment: AlignmentType) => void;
+  onAlignElements?: (
+    personIds: string[],
+    frameIds: string[],
+    annotationIds: string[],
+    alignment: AlignmentType
+  ) => void;
   onBatchUpdatePeople: (personIds: string[], updates: Partial<Person>) => void;
   onDuplicatePeople: (personIds: string[], offsetX?: number, offsetY?: number) => void;
   onBatchRemoveFromCanvas: (personIds: string[]) => void;
@@ -190,7 +210,22 @@ interface CanvasProps {
   bgStyleId?: BackgroundStyleId;
   lineStyleId?: LineStyleId;
   cardStyleId?: CardStyleId;
+  bgConfig?: BackgroundStyleConfig;
+  lineConfig?: LineStyleConfig;
+  cardConfig?: CardStyleConfig;
   onOpenStyleCenter?: () => void;
+  snapshotDiffResult?: SnapshotDiffResult | null;
+  activeSnapshotTitle?: string | null;
+  onClearSnapshotDiff?: () => void;
+  isPresentationMode?: boolean;
+  onExitPresentationMode?: () => void;
+  cameraBookmarks?: CameraBookmark[];
+  onAddCameraBookmark?: (title: string, panX: number, panY: number, zoom: number) => void;
+  onDeleteCameraBookmark?: (id: string) => void;
+  onBeforeInlineEdit?: () => void;
+  onGroupSelectedElements?: (personIds: string[], frameIds: string[], annotationIds: string[]) => void;
+  onUngroupSelectedElements?: (personIds: string[], frameIds: string[], annotationIds: string[]) => void;
+  onToggleLockSelectedElements?: (personIds: string[], frameIds: string[], annotationIds: string[]) => void;
 }
 
 export const Canvas: React.FC<CanvasProps> = ({
@@ -210,9 +245,22 @@ export const Canvas: React.FC<CanvasProps> = ({
   focusedPersonId,
   onSetFocusedPersonId,
   highlightedPathIds,
+  snapshotDiffResult = null,
+  activeSnapshotTitle = null,
+  onClearSnapshotDiff,
+  isPresentationMode = false,
+  onExitPresentationMode,
+  cameraBookmarks = [],
+  onAddCameraBookmark,
+  onDeleteCameraBookmark,
+  onBeforeInlineEdit,
+  onGroupSelectedElements,
+  onUngroupSelectedElements,
+  onToggleLockSelectedElements,
   onOpenTimeline,
   onBatchUpdatePositions,
   onAlignPeople,
+  onAlignElements,
   onBatchUpdatePeople,
   onDuplicatePeople,
   onBatchRemoveFromCanvas,
@@ -246,6 +294,9 @@ export const Canvas: React.FC<CanvasProps> = ({
   bgStyleId = 'grid-dots-slate',
   lineStyleId = 'bezier-smooth',
   cardStyleId = 'classic-white',
+  bgConfig: propBgConfig,
+  lineConfig: propLineConfig,
+  cardConfig: propCardConfig,
   onOpenStyleCenter,
 }) => {
   const { t, language } = useLanguage();
@@ -315,24 +366,64 @@ export const Canvas: React.FC<CanvasProps> = ({
   const [selectedRelIds, setSelectedRelIds] = useState<string[]>([]);
   const [selectedAnnotationIds, setSelectedAnnotationIds] = useState<string[]>([]);
 
-  // Freehand Pen / Highlighter / Smart Shape / Sticky / Lasso Sub-Mode States
+  // Freehand Pen / Highlighter / Shape / Text / Arrow / Sticky / Lasso Sub-Mode States
   const [penColor, setPenColor] = useState<string>('#EF4444');
-  const [penStrokeWidth, setPenStrokeWidth] = useState<number>(4);
+  const [penStrokeWidth, setPenStrokeWidth] = useState<number>(3);
+  const [penArrowMode, setPenArrowMode] = useState<'none' | 'forward' | 'both'>('none');
   const [smartShapeEnabled, setSmartShapeEnabled] = useState<boolean>(true);
+  const [activeShapeType, setActiveShapeType] = useState<SmartShapeType>('rect');
+  const [showShapeDropdown, setShowShapeDropdown] = useState<boolean>(false);
+  const [shapeBgColor, setShapeBgColor] = useState<string>('');
+  const [shapeFontSize, setShapeFontSize] = useState<number>(14);
+  const [drawingNewShape, setDrawingNewShape] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
   const [lassoSubMode, setLassoSubMode] = useState<'select' | 'frame' | 'knife'>('select');
   const [stickyStamp, setStickyStamp] = useState<TacticalStampType>('breakthrough');
+  const [stickyStampLabel, setStickyStampLabel] = useState<string>('重点突破');
   const [stickyColor, setStickyColor] = useState<string>('#EF4444');
+  const [stickyBgColor, setStickyBgColor] = useState<string>('#FEF2F2');
+  const [stickyCalloutMode, setStickyCalloutMode] = useState<'none' | 'solid' | 'dashed'>('solid');
+  const [showColorPalettePopover, setShowColorPalettePopover] = useState<
+    'pen' | 'sticky' | 'selection' | null
+  >(null);
 
   // Active Drawing Stroke & Laser Pointer & Eraser States
   const [drawingStrokePoints, setDrawingStrokePoints] = useState<Point[] | null>(null);
   const [activeLaserPoints, setActiveLaserPoints] = useState<Point[] | null>(null);
+  const [laserCursorPos, setLaserCursorPos] = useState<Point | null>(null);
+  const [laserHoverTrail, setLaserHoverTrail] = useState<{ x: number; y: number; t: number }[]>([]);
   const [laserStrokes, setLaserStrokes] = useState<
     { id: string; points: Point[]; createdAt: number; color: string }[]
   >([]);
   const [eraserTrail, setEraserTrail] = useState<Point[] | null>(null);
 
-  // Annotation Resizing & Sticky Editing States
+  // Annotation 8-Point Perimeter Resizing, Rotation, Callout Corner/Vertex/Pin Dragging & Inline Text Editing States
   const [resizingAnnotationId, setResizingAnnotationId] = useState<string | null>(null);
+  const [resizingAnnotationState, setResizingAnnotationState] = useState<{
+    id: string;
+    handle: 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+    startMouseX: number;
+    startMouseY: number;
+    startX: number;
+    startY: number;
+    startW: number;
+    startH: number;
+    rotation: number;
+  } | null>(null);
+  const [rotatingAnnotationState, setRotatingAnnotationState] = useState<{
+    id: string;
+    centerX: number;
+    centerY: number;
+  } | null>(null);
+  const [draggingCalloutState, setDraggingCalloutState] = useState<{
+    annotationId: string;
+    handleType: 'start' | 'end' | 'elbow';
+    elbowIndex?: number;
+  } | null>(null);
   const resizeInitialAnnotationRef = useRef<{ width: number; height: number }>({
     width: 120,
     height: 120,
@@ -342,8 +433,9 @@ export const Canvas: React.FC<CanvasProps> = ({
   // Clipboard for Copy/Paste
   const [copiedPersonIds, setCopiedPersonIds] = useState<string[]>([]);
 
-  // Batch Dragging State
+  // Batch Dragging State & Smart Alignment Guides
   const [isDraggingSelection, setIsDraggingSelection] = useState(false);
+  const [activeSnapGuides, setActiveSnapGuides] = useState<SmartGuideLine[]>([]);
   const dragStartMouseRef = useRef<Point>({ x: 0, y: 0 });
   const initialPersonPositionsRef = useRef<Map<string, Point>>(new Map());
   const initialFramePositionsRef = useRef<Map<string, Point>>(new Map());
@@ -425,15 +517,24 @@ export const Canvas: React.FC<CanvasProps> = ({
     [relationships]
   );
 
-  // Laser strokes auto-cleanup timer
+  // Laser strokes & hover comet trail auto-cleanup timer
   useEffect(() => {
-    if (laserStrokes.length === 0) return;
+    if (laserStrokes.length === 0 && laserHoverTrail.length === 0) return;
     const interval = setInterval(() => {
       const now = Date.now();
-      setLaserStrokes((prev) => prev.filter((s) => now - s.createdAt < 1400));
-    }, 80);
+      setLaserStrokes((prev) => (prev.length > 0 ? prev.filter((s) => now - s.createdAt < 1400) : prev));
+      setLaserHoverTrail((prev) => (prev.length > 0 ? prev.filter((pt) => now - pt.t < 520) : prev));
+    }, 45);
     return () => clearInterval(interval);
-  }, [laserStrokes.length]);
+  }, [laserStrokes.length, laserHoverTrail.length]);
+
+  useEffect(() => {
+    if (toolMode !== 'laser') {
+      setLaserCursorPos(null);
+      setLaserHoverTrail([]);
+    }
+    setShowColorPalettePopover(null);
+  }, [toolMode]);
 
   const peopleMap = useMemo(() => {
     const m = new Map<string, Person>();
@@ -441,7 +542,15 @@ export const Canvas: React.FC<CanvasProps> = ({
     return m;
   }, [canvasPeople]);
 
-  // Determine connected IDs for focus mode
+  const [activePresentationStopId, setActivePresentationStopId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isPresentationMode && toolMode === 'laser') {
+      setToolMode('select');
+    }
+  }, [isPresentationMode, toolMode]);
+
+  // Determine connected person IDs when focusing on a person's network
   const connectedIds = useMemo(() => {
     if (!focusedPersonId) return null;
     const set = new Set<string>([focusedPersonId]);
@@ -451,6 +560,13 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
     return set;
   }, [focusedPersonId, visibleRelationships]);
+
+  const pathNodeOrderMap = useMemo(() => {
+    if (!highlightedPathIds || highlightedPathIds.length === 0) return null;
+    const map = new Map<string, number>();
+    highlightedPathIds.forEach((id, idx) => map.set(id, idx + 1));
+    return map;
+  }, [highlightedPathIds]);
 
   // Determine path edges for influence path analysis
   const isRelInPath = useMemo(() => {
@@ -466,16 +582,19 @@ export const Canvas: React.FC<CanvasProps> = ({
   }, [highlightedPathIds]);
 
   const activeBgConfig = useMemo(() => {
+    if (propBgConfig) return propBgConfig;
     return BACKGROUND_STYLES.find((b) => b.id === bgStyleId) || BACKGROUND_STYLES[0];
-  }, [bgStyleId]);
+  }, [propBgConfig, bgStyleId]);
 
   const activeLineConfig = useMemo(() => {
+    if (propLineConfig) return propLineConfig;
     return LINE_STYLES.find((l) => l.id === lineStyleId) || LINE_STYLES[0];
-  }, [lineStyleId]);
+  }, [propLineConfig, lineStyleId]);
 
   const activeCardConfig = useMemo(() => {
+    if (propCardConfig) return propCardConfig;
     return CARD_STYLES.find((c) => c.id === cardStyleId) || CARD_STYLES[0];
-  }, [cardStyleId]);
+  }, [propCardConfig, cardStyleId]);
 
   // Fit view to all visible elements while respecting floating toolbar and HUD safe insets
   const handleFitView = useCallback(() => {
@@ -593,19 +712,6 @@ export const Canvas: React.FC<CanvasProps> = ({
     };
   };
 
-  const toggleToolbarOrientation = () => {
-    setToolbarPos((prev) => {
-      const nextOrientation: 'vertical' | 'horizontal' = prev.orientation === 'horizontal' ? 'vertical' : 'horizontal';
-      const next = {
-        ...prev,
-        orientation: nextOrientation,
-      };
-      toolbarPosRef.current = next;
-      saveToolbarPosition(next);
-      return next;
-    });
-  };
-
   // Keyboard shortcuts
   useEffect(() => {
     const isInputFocused = () => {
@@ -618,9 +724,12 @@ export const Canvas: React.FC<CanvasProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isInputFocused()) return;
 
-      if (e.code === 'Space' && !isSpacePressed) {
+      // Spacebar is the default shortcut for Select & Box Selection (选择与框选)
+      if (e.code === 'Space') {
         e.preventDefault();
-        setIsSpacePressed(true);
+        setToolMode('select');
+        setConnectModeSourceId(null);
+        setShowColorPalettePopover(null);
         return;
       }
 
@@ -628,6 +737,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         setContextMenu(null);
         setConnectModeSourceId(null);
         setEditingStickyId(null);
+        setShowColorPalettePopover(null);
         if (toolMode !== 'select') {
           setToolMode('select');
         } else {
@@ -649,8 +759,10 @@ export const Canvas: React.FC<CanvasProps> = ({
         else if (k === 'f') setToolMode('frame');
         else if (k === 'p') setToolMode('pen');
         else if (k === 'g') setToolMode('highlighter');
+        else if (k === 'r') setToolMode('shape');
+        else if (k === 't') setToolMode('text');
         else if (k === 'z') setToolMode('laser');
-        else if (k === 'n') setToolMode('sticky');
+        else if (k === 'n' || k === 's') setToolMode('sticky');
         else if (k === 'e') setToolMode('eraser');
       }
 
@@ -701,6 +813,36 @@ export const Canvas: React.FC<CanvasProps> = ({
         e.preventDefault();
         zoomToLevel(1);
         return;
+      }
+
+      // Group / Ungroup Shortcuts (Ctrl/Cmd + G, Ctrl/Cmd + Shift + G)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          onUngroupSelectedElements?.(selectedPersonIds, selectedFrameIds, selectedAnnotationIds);
+        } else if (
+          selectedPersonIds.length + selectedFrameIds.length + selectedAnnotationIds.length >=
+          2
+        ) {
+          onGroupSelectedElements?.(selectedPersonIds, selectedFrameIds, selectedAnnotationIds);
+        }
+        return;
+      }
+
+      // Lock / Unlock Shortcut (Ctrl/Cmd + L)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'l') {
+        if (
+          selectedPersonIds.length + selectedFrameIds.length + selectedAnnotationIds.length >
+          0
+        ) {
+          e.preventDefault();
+          onToggleLockSelectedElements?.(
+            selectedPersonIds,
+            selectedFrameIds,
+            selectedAnnotationIds
+          );
+          return;
+        }
       }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -815,6 +957,8 @@ export const Canvas: React.FC<CanvasProps> = ({
   const handleBackgroundMouseDown = (e: React.MouseEvent) => {
     setContextMenu(null);
     setEditingStickyId(null);
+    setShowColorPalettePopover(null);
+    setShowShapeDropdown(false);
 
     if (e.button === 1 || (e.button === 0 && (isSpacePressed || toolMode === 'pan'))) {
       e.preventDefault();
@@ -834,7 +978,42 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
+    if (toolMode === 'shape') {
+      setDrawingNewShape({
+        startX: pt.x,
+        startY: pt.y,
+        currentX: pt.x,
+        currentY: pt.y,
+      });
+      return;
+    }
+
+    if (toolMode === 'text') {
+      const created = onCreateAnnotation?.({
+        kind: 'text',
+        x: Math.round(pt.x - 95),
+        y: Math.round(pt.y - 26),
+        width: 190,
+        height: 54,
+        rotation: 0,
+        fontSize: shapeFontSize || 15,
+        color: penColor,
+        bgColor: shapeBgColor || 'transparent',
+        strokeWidth: 1.5,
+        opacity: 1,
+        text: '',
+        zIndex: 152,
+      });
+      if (created && created.id) {
+        setSelectedAnnotationIds([created.id]);
+        setEditingStickyId(created.id);
+      }
+      setToolMode('select');
+      return;
+    }
+
     if (toolMode === 'laser') {
+      setLaserCursorPos(pt);
       setActiveLaserPoints([pt]);
       return;
     }
@@ -847,9 +1026,17 @@ export const Canvas: React.FC<CanvasProps> = ({
         width: 210,
         height: 136,
         color: stickyColor,
+        bgColor: stickyBgColor,
         strokeWidth: 2,
         opacity: 1,
         stamp: stickyStamp,
+        stampLabel: stickyStampLabel.trim() || '重点突破',
+        calloutEnabled: stickyCalloutMode !== 'none',
+        calloutStyle: stickyCalloutMode === 'dashed' ? 'dashed' : 'solid',
+        calloutStartNorm: { x: 0, y: 1 },
+        calloutElbows: [{ x: -38, y: 180 }],
+        calloutOffsetX: -88,
+        calloutOffsetY: 180,
         text: language === 'zh' ? '请填写关键推进动作或防冲标卡点…' : 'Enter tactical note or action item...',
         zIndex: 155,
       });
@@ -914,17 +1101,30 @@ export const Canvas: React.FC<CanvasProps> = ({
   // Global mousemove & mouseup for gestures and draggable menu bar
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      // 0. Dragging the Floating Menu Bar
+      // 0. Dragging the Floating Menu Bar (auto-transforms between horizontal & vertical based on screen zone)
       if (isDraggingToolbar && containerRef.current) {
         const deltaX = e.clientX - toolbarDragStartRef.current.mouseX;
         const deltaY = e.clientY - toolbarDragStartRef.current.mouseY;
         const rect = containerRef.current.getBoundingClientRect();
-        const isHoriz = toolbarPosRef.current.orientation === 'horizontal';
-        const barW = isHoriz ? 520 : 54;
-        const barH = isHoriz ? 54 : 520;
-        const nextX = Math.max(10, Math.min(rect.width - barW - 10, toolbarDragStartRef.current.startX + deltaX));
-        const nextY = Math.max(10, Math.min(rect.height - barH - 10, toolbarDragStartRef.current.startY + deltaY));
-        const updated = { ...toolbarPosRef.current, x: nextX, y: nextY };
+        const relX = e.clientX - rect.left;
+        const relY = e.clientY - rect.top;
+
+        const distTopBottom = Math.min(relY, rect.height - relY);
+        const distLeftRight = Math.min(relX, rect.width - relX);
+
+        let nextOrientation = toolbarPosRef.current.orientation;
+        if (distTopBottom < 105 && distTopBottom < distLeftRight) {
+          nextOrientation = 'horizontal';
+        } else if (distLeftRight < 160 || (relY >= 105 && relY <= rect.height - 105)) {
+          nextOrientation = 'vertical';
+        }
+
+        const isHoriz = nextOrientation === 'horizontal';
+        const barW = isHoriz ? 440 : 52;
+        const barH = isHoriz ? 52 : 440;
+        const nextX = Math.max(12, Math.min(rect.width - barW - 12, toolbarDragStartRef.current.startX + deltaX));
+        const nextY = Math.max(12, Math.min(rect.height - barH - 12, toolbarDragStartRef.current.startY + deltaY));
+        const updated = { x: nextX, y: nextY, orientation: nextOrientation };
         setToolbarPos(updated);
         toolbarPosRef.current = updated;
         return;
@@ -937,6 +1137,29 @@ export const Canvas: React.FC<CanvasProps> = ({
           y: e.clientY - panStartRef.current.y,
         });
         return;
+      }
+
+      // Track Laser Pointer Red Dot & Comet Tail in real-time whenever in laser mode
+      if (toolMode === 'laser' && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const isInside =
+          e.clientX >= rect.left &&
+          e.clientX <= rect.right &&
+          e.clientY >= rect.top &&
+          e.clientY <= rect.bottom;
+        if (isInside) {
+          const pt = screenToCanvas(e.clientX, e.clientY, rect, pan.x, pan.y, zoom);
+          setLaserCursorPos(pt);
+          const now = Date.now();
+          setLaserHoverTrail((prev) => {
+            const recent = prev.filter((item) => now - item.t < 520);
+            const last = recent[recent.length - 1];
+            if (last && Math.hypot(pt.x - last.x, pt.y - last.y) < 1.8) return recent;
+            return [...recent.slice(-42), { x: pt.x, y: pt.y, t: now }];
+          });
+        } else {
+          setLaserCursorPos(null);
+        }
       }
 
       // 1b. Active Freehand Pen or Highlighter Stroke
@@ -952,7 +1175,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         return;
       }
 
-      // 1c. Active Presentation Laser Pointer
+      // 1c. Active Presentation Laser Pointer Dragging
       if (activeLaserPoints && containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
         const pt = screenToCanvas(e.clientX, e.clientY, rect, pan.x, pan.y, zoom);
@@ -989,7 +1212,80 @@ export const Canvas: React.FC<CanvasProps> = ({
         return;
       }
 
-      // 2b. Resizing CanvasAnnotation
+      // 2b. Rotating CanvasAnnotation around its center
+      if (rotatingAnnotationState && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const pt = screenToCanvas(e.clientX, e.clientY, rect, pan.x, pan.y, zoom);
+        let deg =
+          (Math.atan2(
+            pt.y - rotatingAnnotationState.centerY,
+            pt.x - rotatingAnnotationState.centerX
+          ) *
+            180) /
+            Math.PI +
+          90;
+        deg = ((deg % 360) + 360) % 360;
+        if (deg > 180) deg -= 360;
+        if (e.shiftKey) {
+          deg = Math.round(deg / 15) * 15;
+        } else {
+          // Subtle snap to 0°, ±90°, ±180° within 3°
+          for (const snapAngle of [0, 90, -90, 180, -180]) {
+            if (Math.abs(deg - snapAngle) <= 3) {
+              deg = snapAngle === -180 ? 180 : snapAngle;
+              break;
+            }
+          }
+        }
+        onUpdateAnnotation?.(rotatingAnnotationState.id, { rotation: Math.round(deg) });
+        return;
+      }
+
+      // 2c. 8-Point Perimeter Corner/Edge Resizing on CanvasAnnotation
+      if (resizingAnnotationState) {
+        const rawDx = (e.clientX - resizingAnnotationState.startMouseX) / zoom;
+        const rawDy = (e.clientY - resizingAnnotationState.startMouseY) / zoom;
+        const rad = (-resizingAnnotationState.rotation * Math.PI) / 180;
+        const localDx = rawDx * Math.cos(rad) - rawDy * Math.sin(rad);
+        const localDy = rawDx * Math.sin(rad) + rawDy * Math.cos(rad);
+
+        const minW = 40;
+        const minH = 32;
+        let nextX = resizingAnnotationState.startX;
+        let nextY = resizingAnnotationState.startY;
+        let nextW = resizingAnnotationState.startW;
+        let nextH = resizingAnnotationState.startH;
+        const hType = resizingAnnotationState.handle;
+
+        if (hType.includes('e')) {
+          nextW = Math.max(minW, Math.round(resizingAnnotationState.startW + localDx));
+        }
+        if (hType.includes('w')) {
+          nextW = Math.max(minW, Math.round(resizingAnnotationState.startW - localDx));
+          nextX = Math.round(
+            resizingAnnotationState.startX + (resizingAnnotationState.startW - nextW)
+          );
+        }
+        if (hType.includes('s')) {
+          nextH = Math.max(minH, Math.round(resizingAnnotationState.startH + localDy));
+        }
+        if (hType.includes('n')) {
+          nextH = Math.max(minH, Math.round(resizingAnnotationState.startH - localDy));
+          nextY = Math.round(
+            resizingAnnotationState.startY + (resizingAnnotationState.startH - nextH)
+          );
+        }
+
+        onUpdateAnnotation?.(resizingAnnotationState.id, {
+          x: nextX,
+          y: nextY,
+          width: nextW,
+          height: nextH,
+        });
+        return;
+      }
+
+      // Legacy fallback bottom-right resize
       if (resizingAnnotationId) {
         const deltaX = (e.clientX - resizeStartMouseRef.current.x) / zoom;
         const deltaY = (e.clientY - resizeStartMouseRef.current.y) / zoom;
@@ -999,17 +1295,246 @@ export const Canvas: React.FC<CanvasProps> = ({
         return;
       }
 
-      // 3. Batch dragging selected Person cards, GroupFrames & Annotations
+      // 2d. Dragging Sticky Note Callout Origin Corner, Elbow Corner Vertex, or Target Pin
+      if (draggingCalloutState && containerRef.current) {
+        const targetAnn = annotations.find((a) => a.id === draggingCalloutState.annotationId);
+        if (targetAnn) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const pt = screenToCanvas(e.clientX, e.clientY, rect, pan.x, pan.y, zoom);
+
+          if (draggingCalloutState.handleType === 'start') {
+            // Snap origin point to the sticky note's 4 corners or 4 edge midpoints (or perimeter)
+            const snapped = snapPointToBoxPerimeter(
+              pt,
+              {
+                x: targetAnn.x,
+                y: targetAnn.y,
+                width: targetAnn.width,
+                height: targetAnn.height,
+              },
+              24 / zoom
+            );
+            onUpdateAnnotation?.(targetAnn.id, {
+              calloutStartNorm: { x: snapped.nx, y: snapped.ny },
+            });
+          } else if (
+            draggingCalloutState.handleType === 'elbow' &&
+            draggingCalloutState.elbowIndex !== undefined
+          ) {
+            // Move intermediate corner/elbow vertex with smart orthogonal (90°) alignment snapping
+            const currentGeometry = computeStickyCalloutGeometry(targetAnn);
+            const currentElbows = [...currentGeometry.elbowOffsets];
+            const idx = draggingCalloutState.elbowIndex;
+            if (idx >= 0 && idx < currentElbows.length) {
+              let snapWorldX = pt.x;
+              let snapWorldY = pt.y;
+              const prevNeighbor =
+                idx === 0
+                  ? currentGeometry.startPt
+                  : {
+                      x: targetAnn.x + currentElbows[idx - 1].x,
+                      y: targetAnn.y + currentElbows[idx - 1].y,
+                    };
+              const nextNeighbor =
+                idx === currentElbows.length - 1
+                  ? currentGeometry.endPt
+                  : {
+                      x: targetAnn.x + currentElbows[idx + 1].x,
+                      y: targetAnn.y + currentElbows[idx + 1].y,
+                    };
+
+              const orthoThreshold = 7 / zoom;
+              if (Math.abs(snapWorldX - prevNeighbor.x) <= orthoThreshold) {
+                snapWorldX = prevNeighbor.x;
+              } else if (Math.abs(snapWorldX - nextNeighbor.x) <= orthoThreshold) {
+                snapWorldX = nextNeighbor.x;
+              }
+              if (Math.abs(snapWorldY - prevNeighbor.y) <= orthoThreshold) {
+                snapWorldY = prevNeighbor.y;
+              } else if (Math.abs(snapWorldY - nextNeighbor.y) <= orthoThreshold) {
+                snapWorldY = nextNeighbor.y;
+              }
+
+              currentElbows[idx] = {
+                x: Math.round(snapWorldX - targetAnn.x),
+                y: Math.round(snapWorldY - targetAnn.y),
+              };
+              onUpdateAnnotation?.(targetAnn.id, {
+                calloutElbows: currentElbows,
+              });
+            }
+          } else if (draggingCalloutState.handleType === 'end') {
+            // Snap target pin to Person card corners/anchors or GroupFrame corners
+            let snappedPersonId: string | undefined = undefined;
+            let snappedTargetNorm: { x: number; y: number } | undefined = undefined;
+            let resolvedPt: Point = pt;
+
+            for (const person of canvasPeople) {
+              if (
+                pt.x >= person.x - 22 &&
+                pt.x <= person.x + CARD_WIDTH + 22 &&
+                pt.y >= person.y - 22 &&
+                pt.y <= person.y + CARD_HEIGHT + 22
+              ) {
+                const snapped = snapPointToBoxPerimeter(
+                  pt,
+                  {
+                    x: person.x,
+                    y: person.y,
+                    width: CARD_WIDTH,
+                    height: CARD_HEIGHT,
+                  },
+                  26 / zoom
+                );
+                snappedPersonId = person.id;
+                snappedTargetNorm = { x: snapped.nx, y: snapped.ny };
+                resolvedPt = { x: snapped.x, y: snapped.y };
+                break;
+              }
+            }
+
+            if (!snappedPersonId) {
+              for (const frame of visibleFrames) {
+                const nearPerimeter =
+                  pt.x >= frame.x - 18 &&
+                  pt.x <= frame.x + frame.width + 18 &&
+                  pt.y >= frame.y - 18 &&
+                  pt.y <= frame.y + frame.height + 18;
+                if (nearPerimeter) {
+                  const snappedFrame = snapPointToBoxPerimeter(
+                    pt,
+                    {
+                      x: frame.x,
+                      y: frame.y,
+                      width: frame.width,
+                      height: frame.height,
+                    },
+                    22 / zoom
+                  );
+                  if (snappedFrame.snappedKeyPoint) {
+                    resolvedPt = { x: snappedFrame.x, y: snappedFrame.y };
+                    break;
+                  }
+                }
+              }
+            }
+
+            onUpdateAnnotation?.(targetAnn.id, {
+              calloutOffsetX: Math.round(resolvedPt.x - targetAnn.x),
+              calloutOffsetY: Math.round(resolvedPt.y - targetAnn.y),
+              calloutTargetPersonId: snappedPersonId,
+              calloutTargetNorm: snappedTargetNorm,
+            });
+          }
+        }
+        return;
+      }
+
+      // 3. Batch dragging selected Person cards, GroupFrames & Annotations (with real-time Smart Alignment Guides)
       if (isDraggingSelection) {
-        const deltaX = (e.clientX - dragStartMouseRef.current.x) / zoom;
-        const deltaY = (e.clientY - dragStartMouseRef.current.y) / zoom;
+        const rawDeltaX = (e.clientX - dragStartMouseRef.current.x) / zoom;
+        const rawDeltaY = (e.clientY - dragStartMouseRef.current.y) / zoom;
+
+        // Compute proposed union bounding box of all dragged items
+        let dragMinX = Infinity;
+        let dragMinY = Infinity;
+        let dragMaxX = -Infinity;
+        let dragMaxY = -Infinity;
+
+        initialPersonPositionsRef.current.forEach((initPos) => {
+          const px = initPos.x + rawDeltaX;
+          const py = initPos.y + rawDeltaY;
+          dragMinX = Math.min(dragMinX, px);
+          dragMinY = Math.min(dragMinY, py);
+          dragMaxX = Math.max(dragMaxX, px + CARD_WIDTH);
+          dragMaxY = Math.max(dragMaxY, py + CARD_HEIGHT);
+        });
+
+        initialFramePositionsRef.current.forEach((initPos, id) => {
+          const f = visibleFrames.find((fr) => fr.id === id);
+          const fw = f ? f.width : 300;
+          const fh = f ? f.height : 240;
+          const fx = initPos.x + rawDeltaX;
+          const fy = initPos.y + rawDeltaY;
+          dragMinX = Math.min(dragMinX, fx);
+          dragMinY = Math.min(dragMinY, fy);
+          dragMaxX = Math.max(dragMaxX, fx + fw);
+          dragMaxY = Math.max(dragMaxY, fy + fh);
+        });
+
+        initialAnnotationPositionsRef.current.forEach((initPos, id) => {
+          const a = visibleAnnotations.find((an) => an.id === id);
+          const aw = a ? a.width : 140;
+          const ah = a ? a.height : 90;
+          const ax = initPos.x + rawDeltaX;
+          const ay = initPos.y + rawDeltaY;
+          dragMinX = Math.min(dragMinX, ax);
+          dragMinY = Math.min(dragMinY, ay);
+          dragMaxX = Math.max(dragMaxX, ax + aw);
+          dragMaxY = Math.max(dragMaxY, ay + ah);
+        });
+
+        let finalDeltaX = rawDeltaX;
+        let finalDeltaY = rawDeltaY;
+
+        // Default: Smart Guides enabled; holding Alt temporarily disables magnetic snapping
+        if (!e.altKey && Number.isFinite(dragMinX) && Number.isFinite(dragMinY)) {
+          const movingBox = {
+            x: dragMinX,
+            y: dragMinY,
+            width: Math.max(1, dragMaxX - dragMinX),
+            height: Math.max(1, dragMaxY - dragMinY),
+          };
+
+          const staticBoxes: { x: number; y: number; width: number; height: number }[] = [];
+
+          canvasPeople.forEach((p) => {
+            if (!initialPersonPositionsRef.current.has(p.id)) {
+              staticBoxes.push({
+                x: p.x,
+                y: p.y,
+                width: CARD_WIDTH,
+                height: CARD_HEIGHT,
+              });
+            }
+          });
+
+          visibleFrames.forEach((f) => {
+            if (!initialFramePositionsRef.current.has(f.id)) {
+              staticBoxes.push({
+                x: f.x,
+                y: f.y,
+                width: f.width,
+                height: f.height,
+              });
+            }
+          });
+
+          visibleAnnotations.forEach((a) => {
+            if (!initialAnnotationPositionsRef.current.has(a.id)) {
+              staticBoxes.push({
+                x: a.x,
+                y: a.y,
+                width: a.width,
+                height: a.height,
+              });
+            }
+          });
+
+          const snapRes = computeSmartSnapGuides(movingBox, staticBoxes, 6 / zoom);
+          finalDeltaX = rawDeltaX + snapRes.snappedDeltaX;
+          finalDeltaY = rawDeltaY + snapRes.snappedDeltaY;
+          setActiveSnapGuides(snapRes.guides);
+        } else {
+          setActiveSnapGuides([]);
+        }
 
         const personMoves: { id: string; x: number; y: number }[] = [];
         initialPersonPositionsRef.current.forEach((initPos, id) => {
           personMoves.push({
             id,
-            x: Math.round(initPos.x + deltaX),
-            y: Math.round(initPos.y + deltaY),
+            x: Math.round(initPos.x + finalDeltaX),
+            y: Math.round(initPos.y + finalDeltaY),
           });
         });
 
@@ -1017,8 +1542,8 @@ export const Canvas: React.FC<CanvasProps> = ({
         initialFramePositionsRef.current.forEach((initPos, id) => {
           frameMoves.push({
             id,
-            x: Math.round(initPos.x + deltaX),
-            y: Math.round(initPos.y + deltaY),
+            x: Math.round(initPos.x + finalDeltaX),
+            y: Math.round(initPos.y + finalDeltaY),
           });
         });
 
@@ -1026,8 +1551,8 @@ export const Canvas: React.FC<CanvasProps> = ({
         initialAnnotationPositionsRef.current.forEach((initPos, id) => {
           annotationMoves.push({
             id,
-            x: Math.round(initPos.x + deltaX),
-            y: Math.round(initPos.y + deltaY),
+            x: Math.round(initPos.x + finalDeltaX),
+            y: Math.round(initPos.y + finalDeltaY),
           });
         });
 
@@ -1042,6 +1567,27 @@ export const Canvas: React.FC<CanvasProps> = ({
         const rect = containerRef.current.getBoundingClientRect();
         const pt = screenToCanvas(e.clientX, e.clientY, rect, pan.x, pan.y, zoom);
         setDrawingNewFrame((prev) => (prev ? { ...prev, currentX: pt.x, currentY: pt.y } : null));
+        return;
+      }
+
+      // 4b. Drawing a new Geometric Shape
+      if (drawingNewShape && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const pt = screenToCanvas(e.clientX, e.clientY, rect, pan.x, pan.y, zoom);
+        setDrawingNewShape((prev) => {
+          if (!prev) return null;
+          if (e.shiftKey) {
+            const dx = pt.x - prev.startX;
+            const dy = pt.y - prev.startY;
+            const size = Math.max(Math.abs(dx), Math.abs(dy));
+            return {
+              ...prev,
+              currentX: prev.startX + Math.sign(dx || 1) * size,
+              currentY: prev.startY + Math.sign(dy || 1) * size,
+            };
+          }
+          return { ...prev, currentX: pt.x, currentY: pt.y };
+        });
         return;
       }
 
@@ -1060,13 +1606,15 @@ export const Canvas: React.FC<CanvasProps> = ({
 
         if (boxRect.width > 4 || boxRect.height > 4) {
           const hitPeople = canvasPeople
-            .filter((p) =>
-              isRectIntersecting(boxRect, {
-                x: p.x,
-                y: p.y,
-                width: CARD_WIDTH,
-                height: CARD_HEIGHT,
-              })
+            .filter(
+              (p) =>
+                !p.locked &&
+                isRectIntersecting(boxRect, {
+                  x: p.x,
+                  y: p.y,
+                  width: CARD_WIDTH,
+                  height: CARD_HEIGHT,
+                })
             )
             .map((p) => p.id);
 
@@ -1123,11 +1671,13 @@ export const Canvas: React.FC<CanvasProps> = ({
 
           if (next.length >= 3 && lassoSubMode === 'select' && !lassoKnifeActiveRef.current) {
             const hitPeople = canvasPeople
-              .filter((p) =>
-                isPointInPolygon(
-                  { x: p.x + CARD_WIDTH / 2, y: p.y + CARD_HEIGHT / 2 },
-                  next
-                )
+              .filter(
+                (p) =>
+                  !p.locked &&
+                  isPointInPolygon(
+                    { x: p.x + CARD_WIDTH / 2, y: p.y + CARD_HEIGHT / 2 },
+                    next
+                  )
               )
               .map((p) => p.id);
 
@@ -1218,23 +1768,106 @@ export const Canvas: React.FC<CanvasProps> = ({
     const handleMouseUp = () => {
       if (isDraggingToolbar) {
         setIsDraggingToolbar(false);
-        saveToolbarPosition(toolbarPosRef.current);
+        if (containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const cur = toolbarPosRef.current;
+          const isHoriz = cur.orientation === 'horizontal';
+          const barW = isHoriz ? 440 : 52;
+          const barH = isHoriz ? 52 : 440;
+          let snappedX = cur.x;
+          let snappedY = cur.y;
+          if (!isHoriz) {
+            if (cur.x < 42) snappedX = 16;
+            else if (cur.x > rect.width - barW - 42) snappedX = Math.max(16, rect.width - barW - 16);
+          } else {
+            if (cur.y < 42) snappedY = 16;
+            else if (cur.y > rect.height - barH - 42) snappedY = Math.max(16, rect.height - barH - 16);
+          }
+          const finalPos = { x: snappedX, y: snappedY, orientation: cur.orientation };
+          setToolbarPos(finalPos);
+          toolbarPosRef.current = finalPos;
+          saveToolbarPosition(finalPos);
+        } else {
+          saveToolbarPosition(toolbarPosRef.current);
+        }
       }
       if (isPanning) setIsPanning(false);
       if (resizingFrameId) setResizingFrameId(null);
       if (resizingAnnotationId) setResizingAnnotationId(null);
-      if (isDraggingSelection) setIsDraggingSelection(false);
+      if (resizingAnnotationState) setResizingAnnotationState(null);
+      if (rotatingAnnotationState) setRotatingAnnotationState(null);
+      if (draggingCalloutState) setDraggingCalloutState(null);
+      if (isDraggingSelection) {
+        setIsDraggingSelection(false);
+        setActiveSnapGuides([]);
+      }
+      if (activeSnapGuides.length > 0) setActiveSnapGuides([]);
       if (eraserTrail) setEraserTrail(null);
+
+      // Finalize Drawing a New Geometric Shape
+      if (drawingNewShape) {
+        const rawW = Math.abs(drawingNewShape.currentX - drawingNewShape.startX);
+        const rawH = Math.abs(drawingNewShape.currentY - drawingNewShape.startY);
+        const shapeMeta =
+          COMMON_SHAPE_ITEMS.find((s) => s.key === activeShapeType) || COMMON_SHAPE_ITEMS[0];
+        const isClickPlacement = rawW < 12 && rawH < 12;
+        const finalW = isClickPlacement ? shapeMeta.defaultW : Math.max(54, Math.round(rawW));
+        const finalH = isClickPlacement ? shapeMeta.defaultH : Math.max(42, Math.round(rawH));
+        const finalX = isClickPlacement
+          ? Math.round(drawingNewShape.startX - finalW / 2)
+          : Math.round(Math.min(drawingNewShape.startX, drawingNewShape.currentX));
+        const finalY = isClickPlacement
+          ? Math.round(drawingNewShape.startY - finalH / 2)
+          : Math.round(Math.min(drawingNewShape.startY, drawingNewShape.currentY));
+
+        const created = onCreateAnnotation?.({
+          kind: 'shape',
+          shapeType: activeShapeType,
+          x: finalX,
+          y: finalY,
+          width: finalW,
+          height: finalH,
+          rotation: 0,
+          fontSize: shapeFontSize || 14,
+          color: penColor,
+          bgColor: shapeBgColor || undefined,
+          strokeWidth: penStrokeWidth,
+          opacity: 1,
+          text: '',
+          zIndex: 148,
+        });
+        if (created && created.id) {
+          setSelectedAnnotationIds([created.id]);
+          setSelectedPersonIds([]);
+          setSelectedFrameIds([]);
+          setSelectedRelIds([]);
+        }
+        setDrawingNewShape(null);
+        setToolMode('select');
+        return;
+      }
 
       // Finalize Freehand Pen / Highlighter / Smart Shape
       if (drawingStrokePoints) {
-        if (drawingStrokePoints.length >= 2) {
-          if (toolMode === 'pen' && smartShapeEnabled && drawingStrokePoints.length >= 4) {
-            const recognized = recognizeSmartShape(drawingStrokePoints);
+        const cleanedPts = cleanStrokeEndpoints(drawingStrokePoints);
+        if (cleanedPts.length >= 2) {
+          if (toolMode === 'pen' && smartShapeEnabled && cleanedPts.length >= 4) {
+            const recognized = recognizeSmartShape(cleanedPts);
             if (recognized) {
+              const resolvedArrow: 'none' | 'forward' | 'both' =
+                penArrowMode !== 'none'
+                  ? penArrowMode
+                  : recognized.shapeType === 'arrow'
+                  ? 'forward'
+                  : 'none';
+              const resolvedShapeType =
+                (recognized.shapeType === 'line' || recognized.shapeType === 'arrow') &&
+                resolvedArrow !== 'none'
+                  ? 'arrow'
+                  : recognized.shapeType;
               onCreateAnnotation?.({
                 kind: 'shape',
-                shapeType: recognized.shapeType,
+                shapeType: resolvedShapeType,
                 x: recognized.x,
                 y: recognized.y,
                 width: recognized.width,
@@ -1242,6 +1875,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                 points: recognized.normalizedPoints,
                 arrowStart: recognized.normalizedPoints?.[0],
                 arrowEnd: recognized.normalizedPoints?.[1],
+                arrow: resolvedArrow,
                 color: penColor,
                 strokeWidth: penStrokeWidth,
                 opacity: 1,
@@ -1252,7 +1886,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             }
           }
 
-          const simplified = simplifyPointsRDP(drawingStrokePoints, 1.8);
+          const simplified = simplifyPointsRDP(cleanedPts, 1.5);
           const normalized = normalizeStrokePoints(simplified);
           const isHighlighter = toolMode === 'highlighter';
           onCreateAnnotation?.({
@@ -1262,6 +1896,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             width: normalized.width,
             height: normalized.height,
             points: normalized.normalizedPoints,
+            arrow: isHighlighter ? 'none' : penArrowMode,
             color: penColor,
             strokeWidth: isHighlighter ? Math.max(16, penStrokeWidth * 3.5) : penStrokeWidth,
             opacity: isHighlighter ? 0.36 : 1,
@@ -1396,8 +2031,16 @@ export const Canvas: React.FC<CanvasProps> = ({
     isPanning,
     resizingFrameId,
     resizingAnnotationId,
+    resizingAnnotationState,
+    rotatingAnnotationState,
+    draggingCalloutState,
+    annotations,
     isDraggingSelection,
     drawingStrokePoints,
+    drawingNewShape,
+    activeShapeType,
+    shapeBgColor,
+    shapeFontSize,
     activeLaserPoints,
     eraserTrail,
     drawingNewFrame,
@@ -1411,6 +2054,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     toolMode,
     penColor,
     penStrokeWidth,
+    penArrowMode,
     smartShapeEnabled,
     canvasPeople,
     visibleFrames,
@@ -1443,6 +2087,14 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
+    if (isPresentationMode) {
+      if (toolMode === 'laser') {
+        return;
+      }
+      onSetFocusedPersonId?.(focusedPersonId === person.id ? null : person.id);
+      return;
+    }
+
     if (toolMode === 'connect') {
       if (!connectModeSourceId) {
         setConnectModeSourceId(person.id);
@@ -1465,6 +2117,9 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     let nextSelectedPeople = selectedPersonIds;
+    let nextSelectedFrames = selectedFrameIds;
+    let nextSelectedAnnotations = selectedAnnotationIds;
+
     if (e.shiftKey || e.ctrlKey || e.metaKey) {
       if (selectedPersonIds.includes(person.id)) {
         nextSelectedPeople = selectedPersonIds.filter((id) => id !== person.id);
@@ -1473,11 +2128,31 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
       setSelectedPersonIds(nextSelectedPeople);
     } else if (!selectedPersonIds.includes(person.id)) {
-      nextSelectedPeople = [person.id];
-      setSelectedPersonIds([person.id]);
-      setSelectedFrameIds([]);
-      setSelectedRelIds([]);
-      setSelectedAnnotationIds([]);
+      if (person.groupId && !e.altKey) {
+        const gId = person.groupId;
+        nextSelectedPeople = canvasPeople
+          .filter((p) => p.groupId === gId && !p.locked)
+          .map((p) => p.id);
+        if (!nextSelectedPeople.includes(person.id)) nextSelectedPeople.push(person.id);
+        nextSelectedFrames = visibleFrames
+          .filter((f) => f.groupId === gId && !f.locked)
+          .map((f) => f.id);
+        nextSelectedAnnotations = visibleAnnotations
+          .filter((a) => a.groupId === gId && !a.locked)
+          .map((a) => a.id);
+        setSelectedPersonIds(nextSelectedPeople);
+        setSelectedFrameIds(nextSelectedFrames);
+        setSelectedAnnotationIds(nextSelectedAnnotations);
+        setSelectedRelIds([]);
+      } else {
+        nextSelectedPeople = [person.id];
+        nextSelectedFrames = [];
+        nextSelectedAnnotations = [];
+        setSelectedPersonIds([person.id]);
+        setSelectedFrameIds([]);
+        setSelectedRelIds([]);
+        setSelectedAnnotationIds([]);
+      }
     }
 
     if (person.locked) return;
@@ -1491,7 +2166,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     });
 
     const fMap = new Map<string, Point>();
-    selectedFrameIds.forEach((id) => {
+    nextSelectedFrames.forEach((id) => {
       const f = visibleFrames.find((fr) => fr.id === id);
       if (f && !f.locked) {
         fMap.set(id, { x: f.x, y: f.y });
@@ -1499,7 +2174,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     });
 
     const aMap = new Map<string, Point>();
-    selectedAnnotationIds.forEach((id) => {
+    nextSelectedAnnotations.forEach((id) => {
       const a = visibleAnnotations.find((an) => an.id === id);
       if (a && !a.locked) {
         aMap.set(id, { x: a.x, y: a.y });
@@ -1600,7 +2275,13 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
-    if (toolMode === 'pen' || toolMode === 'highlighter' || toolMode === 'laser') {
+    if (
+      toolMode === 'pen' ||
+      toolMode === 'highlighter' ||
+      toolMode === 'laser' ||
+      toolMode === 'shape' ||
+      toolMode === 'text'
+    ) {
       // Let background handle drawing over existing annotations
       return;
     }
@@ -1617,6 +2298,9 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     let nextSelectedAnnotations = selectedAnnotationIds;
+    let nextSelectedPeople = selectedPersonIds;
+    let nextSelectedFrames = selectedFrameIds;
+
     if (e.shiftKey || e.ctrlKey || e.metaKey) {
       if (selectedAnnotationIds.includes(ann.id)) {
         nextSelectedAnnotations = selectedAnnotationIds.filter((id) => id !== ann.id);
@@ -1625,23 +2309,43 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
       setSelectedAnnotationIds(nextSelectedAnnotations);
     } else if (!selectedAnnotationIds.includes(ann.id)) {
-      nextSelectedAnnotations = [ann.id];
-      setSelectedAnnotationIds([ann.id]);
-      setSelectedPersonIds([]);
-      setSelectedFrameIds([]);
-      setSelectedRelIds([]);
+      if (ann.groupId && !e.altKey) {
+        const gId = ann.groupId;
+        nextSelectedPeople = canvasPeople
+          .filter((p) => p.groupId === gId && !p.locked)
+          .map((p) => p.id);
+        nextSelectedFrames = visibleFrames
+          .filter((f) => f.groupId === gId && !f.locked)
+          .map((f) => f.id);
+        nextSelectedAnnotations = visibleAnnotations
+          .filter((a) => a.groupId === gId && !a.locked)
+          .map((a) => a.id);
+        if (!nextSelectedAnnotations.includes(ann.id)) nextSelectedAnnotations.push(ann.id);
+        setSelectedAnnotationIds(nextSelectedAnnotations);
+        setSelectedPersonIds(nextSelectedPeople);
+        setSelectedFrameIds(nextSelectedFrames);
+        setSelectedRelIds([]);
+      } else {
+        nextSelectedAnnotations = [ann.id];
+        nextSelectedPeople = [];
+        nextSelectedFrames = [];
+        setSelectedAnnotationIds([ann.id]);
+        setSelectedPersonIds([]);
+        setSelectedFrameIds([]);
+        setSelectedRelIds([]);
+      }
     }
 
     if (ann.locked) return;
 
     const pMap = new Map<string, Point>();
-    selectedPersonIds.forEach((id) => {
+    nextSelectedPeople.forEach((id) => {
       const p = peopleMap.get(id);
       if (p && !p.locked) pMap.set(id, { x: p.x, y: p.y });
     });
 
     const fMap = new Map<string, Point>();
-    selectedFrameIds.forEach((id) => {
+    nextSelectedFrames.forEach((id) => {
       const f = visibleFrames.find((fr) => fr.id === id);
       if (f && !f.locked) fMap.set(id, { x: f.x, y: f.y });
     });
@@ -1845,22 +2549,33 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
-  const totalSelectedCount =
-    selectedPersonIds.length +
-    selectedFrameIds.length +
-    selectedRelIds.length +
-    selectedAnnotationIds.length;
+  const alignableSelectedCount =
+    selectedPersonIds.length + selectedFrameIds.length + selectedAnnotationIds.length;
+
+  const totalSelectedCount = alignableSelectedCount + selectedRelIds.length;
+
+  const triggerUnifiedAlign = (alignment: AlignmentType) => {
+    if (onAlignElements) {
+      onAlignElements(selectedPersonIds, selectedFrameIds, selectedAnnotationIds, alignment);
+    } else if (selectedPersonIds.length >= 2) {
+      onAlignPeople(selectedPersonIds, alignment);
+    }
+  };
 
   const cursorClass =
-    isPanning || isSpacePressed || toolMode === 'pan'
+    toolMode === 'laser'
+      ? 'cursor-none'
+      : isPanning || toolMode === 'pan'
       ? 'cursor-grab active:cursor-grabbing'
+      : toolMode === 'text'
+      ? 'cursor-text'
       : toolMode === 'marquee' ||
         toolMode === 'lasso' ||
         toolMode === 'frame' ||
         toolMode === 'connect' ||
         toolMode === 'pen' ||
         toolMode === 'highlighter' ||
-        toolMode === 'laser' ||
+        toolMode === 'shape' ||
         toolMode === 'sticky' ||
         toolMode === 'eraser'
       ? 'cursor-crosshair'
@@ -1870,6 +2585,10 @@ export const Canvas: React.FC<CanvasProps> = ({
     <div
       ref={containerRef}
       onMouseDown={handleBackgroundMouseDown}
+      onMouseLeave={() => {
+        setLaserCursorPos(null);
+        setLaserHoverTrail([]);
+      }}
       onContextMenu={(e) => openContextMenu(e, 'canvas')}
       onDragOver={handleCanvasDragOver}
       onDrop={handleCanvasDrop}
@@ -1884,665 +2603,150 @@ export const Canvas: React.FC<CanvasProps> = ({
         backgroundPosition: `${pan.x}px ${pan.y}px`,
       }}
     >
-      {/* Draggable BoardMix-Style Menu Bar / Toolbar Dock */}
-      <div
-        style={{ left: `${toolbarPos.x}px`, top: `${toolbarPos.y}px` }}
-        className={`absolute z-25 bg-white/95 backdrop-blur-md border border-slate-200/90 rounded-2xl shadow-xl p-1.5 flex ${
-          toolbarPos.orientation === 'horizontal' ? 'flex-row items-center' : 'flex-col items-center'
-        } gap-1 text-slate-600 transition-shadow ${
-          isDraggingToolbar ? 'shadow-2xl ring-2 ring-blue-500/30' : ''
-        }`}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        {/* Minimalist Drag Handle Grip */}
-        <div
-          onMouseDown={handleToolbarGripMouseDown}
-          onDoubleClick={() => {
-            const reset = { x: 20, y: 140, orientation: toolbarPos.orientation };
-            setToolbarPos(reset);
-            toolbarPosRef.current = reset;
-            saveToolbarPosition(reset);
-          }}
-          className={`${
-            toolbarPos.orientation === 'horizontal' ? 'px-1.5 py-2' : 'w-full py-1'
-          } flex items-center justify-center cursor-grab active:cursor-grabbing hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-700 transition-colors`}
-          title={`${t('toolDragHandle')} · ${t('toolResetPosition')}`}
-        >
-          <GripVertical
-            className={`w-3.5 h-3.5 ${toolbarPos.orientation === 'horizontal' ? '' : 'rotate-90'}`}
-            strokeWidth={1.5}
-          />
-        </div>
-
-        {[
-          { mode: 'select' as CanvasToolMode, label: t('toolSelect'), icon: MousePointer },
-          { mode: 'pan' as CanvasToolMode, label: t('toolPan'), icon: Hand },
-          { mode: 'marquee' as CanvasToolMode, label: t('toolMarquee'), icon: BoxSelect },
-          { mode: 'lasso' as CanvasToolMode, label: t('toolLasso'), icon: Lasso },
-          { mode: 'connect' as CanvasToolMode, label: t('toolConnect'), icon: Link2 },
-          { mode: 'frame' as CanvasToolMode, label: t('toolFrame'), icon: Frame },
-        ].map((item) => {
-          const Icon = item.icon;
-          const active = toolMode === item.mode;
-          return (
-            <button
-              key={item.mode}
-              type="button"
-              onClick={() => {
-                setToolMode(item.mode);
-                setConnectModeSourceId(null);
-              }}
-              className={`p-2 rounded-xl transition-all cursor-pointer ${
-                active
-                  ? 'bg-blue-600 text-white shadow-xs'
-                  : 'hover:bg-slate-100 text-slate-600 hover:text-slate-900'
-              }`}
-              title={item.label}
-              aria-label={item.label}
-            >
-              <Icon className="w-4 h-4" strokeWidth={1.5} />
-            </button>
-          );
-        })}
-
-        <div
-          className={
-            toolbarPos.orientation === 'horizontal'
-              ? 'w-[1px] h-6 bg-slate-200 mx-0.5'
-              : 'w-6 h-[1px] bg-slate-200 my-0.5'
+      {/* Draggable BoardMix-Style Menu Bar / Toolbar Dock (Auto-switches Horizontal/Vertical based on position) */}
+      {!isPresentationMode && (
+        <CanvasFloatingToolbar
+          toolbarPos={toolbarPos}
+          isDraggingToolbar={isDraggingToolbar}
+        toolMode={toolMode}
+        activeShapeType={activeShapeType}
+        showShapeDropdown={showShapeDropdown}
+        containerWidth={containerRef.current?.clientWidth || 1000}
+        containerHeight={containerRef.current?.clientHeight || 700}
+        onGripMouseDown={handleToolbarGripMouseDown}
+        onResetToolbarPos={() => {
+          const reset = { x: 20, y: 140, orientation: 'vertical' as const };
+          setToolbarPos(reset);
+          toolbarPosRef.current = reset;
+          saveToolbarPosition(reset);
+        }}
+        onSelectToolMode={(mode) => {
+          setToolMode(mode);
+          setConnectModeSourceId(null);
+          setShowShapeDropdown(false);
+        }}
+        onToggleShapeDropdown={() => {
+          if (toolMode !== 'shape') {
+            setToolMode('shape');
+            setShowShapeDropdown(true);
+          } else {
+            setShowShapeDropdown((prev) => !prev);
           }
-        />
+          setConnectModeSourceId(null);
+        }}
+        onSelectShapeType={(shKey) => {
+          setActiveShapeType(shKey);
+          setToolMode('shape');
+          setShowShapeDropdown(false);
+        }}
+      />
+      )}
 
-        {/* Freehand Tactical Annotation Suite: Pen, Highlighter, Laser, Sticky, Eraser */}
-        {[
-          { mode: 'pen' as CanvasToolMode, label: t('toolPen'), icon: PenTool, activeBg: 'bg-rose-600' },
-          { mode: 'highlighter' as CanvasToolMode, label: t('toolHighlighter'), icon: Highlighter, activeBg: 'bg-amber-500' },
-          { mode: 'laser' as CanvasToolMode, label: t('toolLaser'), icon: Zap, activeBg: 'bg-red-600' },
-          { mode: 'sticky' as CanvasToolMode, label: t('toolSticky'), icon: StickyNote, activeBg: 'bg-emerald-600' },
-          { mode: 'eraser' as CanvasToolMode, label: t('toolEraser'), icon: Eraser, activeBg: 'bg-slate-800' },
-        ].map((item) => {
-          const Icon = item.icon;
-          const active = toolMode === item.mode;
-          return (
-            <button
-              key={item.mode}
-              type="button"
-              onClick={() => {
-                setToolMode(item.mode);
-                setConnectModeSourceId(null);
-              }}
-              className={`p-2 rounded-xl transition-all cursor-pointer ${
-                active
-                  ? `${item.activeBg} text-white shadow-xs`
-                  : 'hover:bg-slate-100 text-slate-600 hover:text-slate-900'
-              }`}
-              title={item.label}
-              aria-label={item.label}
-            >
-              <Icon className="w-4 h-4" strokeWidth={1.5} />
-            </button>
-          );
-        })}
+      {/* Top Context Property Bars & Multi-Selection Batch Action Bar */}
+      {!isPresentationMode && (
+      <CanvasPropertyBar
+        toolMode={toolMode}
+        setToolMode={setToolMode}
+        connectModeSourceId={connectModeSourceId}
+        setConnectModeSourceId={setConnectModeSourceId}
+        peopleMap={peopleMap}
+        lassoSubMode={lassoSubMode}
+        setLassoSubMode={setLassoSubMode}
+        penColor={penColor}
+        setPenColor={setPenColor}
+        penStrokeWidth={penStrokeWidth}
+        setPenStrokeWidth={setPenStrokeWidth}
+        penArrowMode={penArrowMode}
+        setPenArrowMode={setPenArrowMode}
+        smartShapeEnabled={smartShapeEnabled}
+        setSmartShapeEnabled={setSmartShapeEnabled}
+        showColorPalettePopover={showColorPalettePopover}
+        setShowColorPalettePopover={setShowColorPalettePopover}
+        toolbarPos={toolbarPos}
+        activeShapeType={activeShapeType}
+        shapeBgColor={shapeBgColor}
+        setShapeBgColor={setShapeBgColor}
+        shapeFontSize={shapeFontSize}
+        setShapeFontSize={setShapeFontSize}
+        stickyStamp={stickyStamp}
+        setStickyStamp={setStickyStamp}
+        stickyStampLabel={stickyStampLabel}
+        setStickyStampLabel={setStickyStampLabel}
+        stickyColor={stickyColor}
+        setStickyColor={setStickyColor}
+        stickyBgColor={stickyBgColor}
+        setStickyBgColor={setStickyBgColor}
+        stickyCalloutMode={stickyCalloutMode}
+        setStickyCalloutMode={setStickyCalloutMode}
+        totalSelectedCount={totalSelectedCount}
+        alignableSelectedCount={alignableSelectedCount}
+        selectedPersonIds={selectedPersonIds}
+        selectedFrameIds={selectedFrameIds}
+        selectedAnnotationIds={selectedAnnotationIds}
+        annotations={annotations}
+        hasGroupedSelection={
+          people.some((p) => selectedPersonIds.includes(p.id) && Boolean(p.groupId)) ||
+          groupFrames.some((f) => selectedFrameIds.includes(f.id) && Boolean(f.groupId)) ||
+          annotations.some((a) => selectedAnnotationIds.includes(a.id) && Boolean(a.groupId))
+        }
+        hasLockedSelection={
+          people.some((p) => selectedPersonIds.includes(p.id) && Boolean(p.locked)) ||
+          groupFrames.some((f) => selectedFrameIds.includes(f.id) && Boolean(f.locked)) ||
+          annotations.some((a) => selectedAnnotationIds.includes(a.id) && Boolean(a.locked))
+        }
+        onTriggerUnifiedAlign={triggerUnifiedAlign}
+        onGroupPeopleIntoFrame={onGroupPeopleIntoFrame}
+        onGroupSelectedElements={() =>
+          onGroupSelectedElements?.(selectedPersonIds, selectedFrameIds, selectedAnnotationIds)
+        }
+        onUngroupSelectedElements={() =>
+          onUngroupSelectedElements?.(selectedPersonIds, selectedFrameIds, selectedAnnotationIds)
+        }
+        onToggleLockSelectedElements={() =>
+          onToggleLockSelectedElements?.(selectedPersonIds, selectedFrameIds, selectedAnnotationIds)
+        }
+        onBatchMoveLayer={onBatchMoveLayer}
+        onUpdateAnnotation={onUpdateAnnotation}
+        onDeleteAnnotations={onDeleteAnnotations}
+        onClearSelectedAnnotations={() => setSelectedAnnotationIds([])}
+        onBatchUpdatePeople={onBatchUpdatePeople}
+        onDuplicatePeople={onDuplicatePeople}
+        onBatchRemoveFromCanvas={onBatchRemoveFromCanvas}
+        onClearSelectedPeople={() => setSelectedPersonIds([])}
+      />
+      )}
 
+      {/* Module 1.3: Snapshot Diff Floating Comparison Status Banner */}
+      {snapshotDiffResult && !isPresentationMode && (
         <div
-          className={
-            toolbarPos.orientation === 'horizontal'
-              ? 'w-[1px] h-6 bg-slate-200 mx-0.5'
-              : 'w-6 h-[1px] bg-slate-200 my-0.5'
-          }
-        />
-
-        {/* Quick Create Person at Viewport Center */}
-        <button
-          type="button"
-          onClick={() => {
-            if (!containerRef.current) return;
-            const rect = containerRef.current.getBoundingClientRect();
-            const centerPt = screenToCanvas(
-              rect.left + rect.width / 2,
-              rect.top + rect.height / 2,
-              rect,
-              pan.x,
-              pan.y,
-              zoom
-            );
-            onCreatePersonAt(
-              Math.round(centerPt.x - CARD_WIDTH / 2),
-              Math.round(centerPt.y - CARD_HEIGHT / 2)
-            );
-          }}
-          className="p-2 rounded-xl hover:bg-slate-100 text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
-          title={t('toolAddPersonCenter')}
-        >
-          <UserPlus className="w-4 h-4 text-blue-600" strokeWidth={1.5} />
-        </button>
-
-        {/* Toggle Layer Manager Panel */}
-        <button
-          type="button"
-          onClick={onToggleLayerPanel}
-          className={`p-2 rounded-xl transition-colors cursor-pointer ${
-            isLayerPanelOpen
-              ? 'bg-indigo-600 text-white shadow-xs'
-              : 'hover:bg-slate-100 text-slate-600 hover:text-slate-900'
-          }`}
-          title={t('toolLayerPanel')}
-        >
-          <Layers className="w-4 h-4" strokeWidth={1.5} />
-        </button>
-
-        {/* Toggle Horizontal / Vertical Orientation */}
-        <button
-          type="button"
-          onClick={toggleToolbarOrientation}
-          className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
-          title={`${t('toolOrientationToggle')} (${toolbarPos.orientation === 'horizontal' ? t('orientationHorizontal') : t('orientationVertical')})`}
-        >
-          <Columns
-            className={`w-4 h-4 ${toolbarPos.orientation === 'horizontal' ? 'rotate-90' : ''}`}
-            strokeWidth={1.5}
-          />
-        </button>
-      </div>
-
-      {/* Top Banner & Secondary Property Bar for Active Drawing / Connect / Lasso / Frame Tool Modes */}
-      {toolMode === 'connect' && (
-        <div
-          className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-blue-600 text-white px-4 py-1.5 rounded-xl shadow-lg text-xs font-semibold flex items-center gap-2"
+          className="absolute top-14 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-slate-900/95 backdrop-blur-md text-white px-4 py-2 rounded-2xl shadow-2xl border border-amber-500/40"
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <Link2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-          <span>
-            {connectModeSourceId
-              ? t('bannerConnectSourceSelected', { name: peopleMap.get(connectModeSourceId)?.name || '' })
-              : t('bannerConnectIdle')}
+          <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+            ⏱ 历史快照对比中：{activeSnapshotTitle || '历史基线'}
           </span>
-          <button
-            type="button"
-            onClick={() => {
-              setConnectModeSourceId(null);
-              setToolMode('select');
-            }}
-            className="ml-2 bg-blue-700 hover:bg-blue-800 px-2 py-0.5 rounded text-[11px] cursor-pointer"
-          >
-            {t('exitEsc')}
-          </button>
-        </div>
-      )}
-
-      {toolMode === 'lasso' && (
-        <div
-          className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-white/98 backdrop-blur-md border border-slate-200 rounded-2xl shadow-xl px-3.5 py-1.5 flex items-center gap-2.5 text-xs text-slate-700"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center gap-1.5 text-indigo-600 font-bold">
-            <Lasso className="w-4 h-4" strokeWidth={1.5} />
-            <span>{language === 'zh' ? '自由套索与刀切 (L)' : 'Lasso & Knife (L)'}</span>
-          </div>
-          <div className="h-4 w-[1px] bg-slate-200" />
-          <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
-            {[
-              { key: 'select', label: language === 'zh' ? '圈选节点' : 'Select Nodes', icon: Lasso },
-              { key: 'frame', label: language === 'zh' ? '套索直接建组' : 'Lasso to Frame', icon: Frame },
-              { key: 'knife', label: language === 'zh' ? '划线切断连线 (Alt)' : 'Slice Links (Alt)', icon: Scissors },
-            ].map((m) => {
-              const MIcon = m.icon;
-              return (
-                <button
-                  key={m.key}
-                  type="button"
-                  onClick={() => setLassoSubMode(m.key as any)}
-                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer ${
-                    lassoSubMode === m.key
-                      ? m.key === 'knife'
-                        ? 'bg-rose-600 text-white shadow-2xs'
-                        : 'bg-indigo-600 text-white shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <MIcon className="w-3 h-3" strokeWidth={1.5} />
-                  <span>{m.label}</span>
-                </button>
-              );
-            })}
-          </div>
-          <button
-            type="button"
-            onClick={() => setToolMode('select')}
-            className="ml-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium cursor-pointer"
-          >
-            {t('switchBackSelect')}
-          </button>
-        </div>
-      )}
-
-      {(toolMode === 'pen' || toolMode === 'highlighter' || toolMode === 'laser') && (
-        <div
-          className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-white/98 backdrop-blur-md border border-slate-200 rounded-2xl shadow-xl px-3.5 py-1.5 flex items-center gap-3 text-xs text-slate-700"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center gap-1.5 font-bold text-slate-900">
-            {toolMode === 'pen' ? (
-              <PenTool className="w-4 h-4 text-rose-600" strokeWidth={1.5} />
-            ) : toolMode === 'highlighter' ? (
-              <Highlighter className="w-4 h-4 text-amber-500" strokeWidth={1.5} />
-            ) : (
-              <Zap className="w-4 h-4 text-red-600" strokeWidth={1.5} />
-            )}
-            <span>
-              {toolMode === 'pen'
-                ? language === 'zh'
-                  ? '自由画笔 (P)'
-                  : 'Freehand Pen (P)'
-                : toolMode === 'highlighter'
-                ? language === 'zh'
-                  ? '荧光马克笔 (G)'
-                  : 'Highlighter (G)'
-                : language === 'zh'
-                ? '演示激光笔 (Z · 自动消隐)'
-                : 'Laser Pointer (Z)'}
+          <div className="flex items-center gap-2 text-[11px] font-mono border-l border-r border-slate-700 px-3">
+            <span className="text-emerald-400 font-bold">
+              +{snapshotDiffResult.addedPeople.length} 新增人物
+            </span>
+            <span className="text-emerald-300 font-bold">
+              ↑{snapshotDiffResult.attitudeUpgraded.length} 态度升温
+            </span>
+            <span className="text-rose-400 font-bold">
+              ↓{snapshotDiffResult.attitudeDowngraded.length} 态度降温
             </span>
           </div>
-
-          <div className="h-4 w-[1px] bg-slate-200" />
-
-          {/* Tactical Color Swatches */}
-          <div className="flex items-center gap-1.5">
-            {PEN_TACTICAL_COLORS.map((c) => (
-              <button
-                key={c.value}
-                type="button"
-                onClick={() => setPenColor(c.value)}
-                className={`w-4.5 h-4.5 rounded-full border transition-transform cursor-pointer ${
-                  penColor === c.value
-                    ? 'scale-125 ring-2 ring-blue-500 ring-offset-1 border-white'
-                    : 'border-slate-200 hover:scale-110'
-                }`}
-                style={{ backgroundColor: c.value }}
-                title={c.name}
-              />
-            ))}
-          </div>
-
-          {toolMode !== 'laser' && (
-            <>
-              <div className="h-4 w-[1px] bg-slate-200" />
-              {/* Stroke Width Selector */}
-              <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
-                {PEN_STROKE_WIDTHS.map((w) => (
-                  <button
-                    key={w}
-                    type="button"
-                    onClick={() => setPenStrokeWidth(w)}
-                    className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold transition-all cursor-pointer ${
-                      penStrokeWidth === w
-                        ? 'bg-white text-slate-900 shadow-2xs'
-                        : 'text-slate-500 hover:text-slate-800'
-                    }`}
-                  >
-                    {w}px
-                  </button>
-                ))}
-              </div>
-            </>
+          {onClearSnapshotDiff && (
+            <button
+              type="button"
+              onClick={onClearSnapshotDiff}
+              className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition-colors cursor-pointer"
+            >
+              退出对比高亮
+            </button>
           )}
-
-          {toolMode === 'pen' && (
-            <>
-              <div className="h-4 w-[1px] bg-slate-200" />
-              <button
-                type="button"
-                onClick={() => setSmartShapeEnabled(!smartShapeEnabled)}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 border transition-colors cursor-pointer ${
-                  smartShapeEnabled
-                    ? 'bg-indigo-50 text-indigo-700 border-indigo-300'
-                    : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
-                }`}
-                title={
-                  language === 'zh'
-                    ? '开启后手绘圆圈、矩形、直线与带勾箭头将自动规整为标准几何矢量图形'
-                    : 'Auto-convert freehand circles, rectangles, lines & arrows into crisp geometric shapes'
-                }
-              >
-                <Wand2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                <span>{language === 'zh' ? '一笔成型规整' : 'Smart Shape'}</span>
-              </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            onClick={() => setToolMode('select')}
-            className="ml-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium cursor-pointer"
-          >
-            {t('switchBackSelect')}
-          </button>
         </div>
       )}
-
-      {toolMode === 'sticky' && (
-        <div
-          className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-white/98 backdrop-blur-md border border-slate-200 rounded-2xl shadow-xl px-3.5 py-1.5 flex items-center gap-2.5 text-xs text-slate-700"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center gap-1.5 font-bold text-emerald-700">
-            <StickyNote className="w-4 h-4" strokeWidth={1.5} />
-            <span>{language === 'zh' ? '作战便签贴纸 (N · 点击画布任意处放置)' : 'Tactical Sticky (N · Click to Place)'}</span>
-          </div>
-          <div className="h-4 w-[1px] bg-slate-200" />
-          <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
-            {TACTICAL_STAMPS.map((st) => (
-              <button
-                key={st.key}
-                type="button"
-                onClick={() => {
-                  setStickyStamp(st.key);
-                  setStickyColor(st.color);
-                }}
-                className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all cursor-pointer ${
-                  stickyStamp === st.key
-                    ? 'bg-white text-slate-900 shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                {language === 'zh' ? st.labelZh : st.labelEn}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            onClick={() => setToolMode('select')}
-            className="ml-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium cursor-pointer"
-          >
-            {t('cancelEsc')}
-          </button>
-        </div>
-      )}
-
-      {toolMode === 'eraser' && (
-        <div
-          className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-slate-900 text-white px-4 py-1.5 rounded-xl shadow-lg text-xs font-semibold flex items-center gap-2"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <Eraser className="w-3.5 h-3.5 text-rose-400" strokeWidth={1.5} />
-          <span>{t('bannerEraser')}</span>
-          <button
-            type="button"
-            onClick={() => setToolMode('select')}
-            className="ml-2 bg-slate-700 hover:bg-slate-600 px-2 py-0.5 rounded text-[11px] cursor-pointer"
-          >
-            {t('switchBackSelect')}
-          </button>
-        </div>
-      )}
-
-      {toolMode === 'frame' && (
-        <div
-          className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-purple-600 text-white px-4 py-1.5 rounded-xl shadow-lg text-xs font-semibold flex items-center gap-2"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <Frame className="w-3.5 h-3.5" strokeWidth={1.5} />
-          <span>{t('bannerFrame')}</span>
-          <button
-            type="button"
-            onClick={() => setToolMode('select')}
-            className="ml-2 bg-purple-700 hover:bg-purple-800 px-2 py-0.5 rounded text-[11px] cursor-pointer"
-          >
-            {t('cancelEsc')}
-          </button>
-        </div>
-      )}
-
-      {/* Floating Multi-Selection Batch Action Bar */}
-      {totalSelectedCount > 0 &&
-        toolMode !== 'connect' &&
-        toolMode !== 'pen' &&
-        toolMode !== 'highlighter' &&
-        toolMode !== 'laser' &&
-        toolMode !== 'eraser' && (
-          <div
-            className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-white/98 backdrop-blur-md border border-slate-200/90 rounded-2xl shadow-xl px-3 py-1.5 flex items-center gap-2 text-xs text-slate-700 max-w-[92vw] overflow-x-auto"
-            onMouseDown={(e) => e.stopPropagation()}
-          >
-            <span className="font-bold text-blue-600 whitespace-nowrap font-mono tabular-nums px-1">
-              {t('selectedCount', { count: totalSelectedCount })}
-            </span>
-
-            <div className="h-4 w-[1px] bg-slate-200 shrink-0" />
-
-            {/* Alignment & Distribution Tools when 2+ Person cards are selected */}
-            {selectedPersonIds.length >= 2 && (
-              <>
-                <div className="flex items-center gap-0.5 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => onAlignPeople(selectedPersonIds, 'left')}
-                    className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                    title={t('alignLeft')}
-                  >
-                    <AlignLeft className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onAlignPeople(selectedPersonIds, 'center-h')}
-                    className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                    title={t('alignCenterH')}
-                  >
-                    <AlignCenterHorizontal className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onAlignPeople(selectedPersonIds, 'right')}
-                    className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                    title={t('alignRight')}
-                  >
-                    <AlignRight className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onAlignPeople(selectedPersonIds, 'top')}
-                    className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                    title={t('alignTop')}
-                  >
-                    <AlignStartVertical className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onAlignPeople(selectedPersonIds, 'center-v')}
-                    className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                    title={t('alignCenterV')}
-                  >
-                    <AlignCenterVertical className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onAlignPeople(selectedPersonIds, 'bottom')}
-                    className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                    title={t('alignBottom')}
-                  >
-                    <AlignEndVertical className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  </button>
-                  {selectedPersonIds.length >= 3 && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => onAlignPeople(selectedPersonIds, 'distribute-h')}
-                        className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                        title={t('distributeH')}
-                      >
-                        <Columns className="w-3.5 h-3.5" strokeWidth={1.5} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onAlignPeople(selectedPersonIds, 'distribute-v')}
-                        className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                        title={t('distributeV')}
-                      >
-                        <Rows className="w-3.5 h-3.5" strokeWidth={1.5} />
-                      </button>
-                    </>
-                  )}
-                </div>
-
-                <div className="h-4 w-[1px] bg-slate-200 shrink-0" />
-
-                {/* Group Selected People into a New GroupFrame */}
-                <button
-                  type="button"
-                  onClick={() => onGroupPeopleIntoFrame(selectedPersonIds)}
-                  className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-lg font-semibold flex items-center gap-1 shrink-0 cursor-pointer whitespace-nowrap"
-                  title={t('packIntoFrameTip')}
-                >
-                  <Frame className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  <span>{t('packIntoFrame')}</span>
-                </button>
-
-                <div className="h-4 w-[1px] bg-slate-200 shrink-0" />
-              </>
-            )}
-
-            {/* Layer Z-Order Controls */}
-            <div className="flex items-center gap-0.5 shrink-0">
-              <button
-                type="button"
-                onClick={() =>
-                  onBatchMoveLayer(
-                    selectedPersonIds,
-                    selectedFrameIds,
-                    'front',
-                    selectedAnnotationIds
-                  )
-                }
-                className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-blue-600 cursor-pointer"
-                title={t('bringToFront')}
-              >
-                <ArrowUpToLine className="w-3.5 h-3.5" strokeWidth={1.5} />
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  onBatchMoveLayer(
-                    selectedPersonIds,
-                    selectedFrameIds,
-                    'forward',
-                    selectedAnnotationIds
-                  )
-                }
-                className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-blue-600 cursor-pointer"
-                title={t('bringForward')}
-              >
-                <ArrowUp className="w-3.5 h-3.5" strokeWidth={1.5} />
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  onBatchMoveLayer(
-                    selectedPersonIds,
-                    selectedFrameIds,
-                    'backward',
-                    selectedAnnotationIds
-                  )
-                }
-                className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-blue-600 cursor-pointer"
-                title={t('sendBackward')}
-              >
-                <ArrowDown className="w-3.5 h-3.5" strokeWidth={1.5} />
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  onBatchMoveLayer(
-                    selectedPersonIds,
-                    selectedFrameIds,
-                    'back',
-                    selectedAnnotationIds
-                  )
-                }
-                className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-blue-600 cursor-pointer"
-                title={t('sendToBack')}
-              >
-                <ArrowDownToLine className="w-3.5 h-3.5" strokeWidth={1.5} />
-              </button>
-            </div>
-
-            {/* Quick Color Swatches for Selected Annotations */}
-            {selectedAnnotationIds.length > 0 && selectedPersonIds.length === 0 && (
-              <>
-                <div className="h-4 w-[1px] bg-slate-200 shrink-0" />
-                <div className="flex items-center gap-1 shrink-0">
-                  {PEN_TACTICAL_COLORS.map((c) => (
-                    <button
-                      key={c.value}
-                      type="button"
-                      onClick={() =>
-                        selectedAnnotationIds.forEach((id) =>
-                          onUpdateAnnotation?.(id, { color: c.value })
-                        )
-                      }
-                      className="w-4 h-4 rounded-full border border-white shadow-2xs hover:scale-120 transition-transform cursor-pointer"
-                      style={{ backgroundColor: c.value }}
-                      title={c.name}
-                    />
-                  ))}
-                </div>
-                <div className="h-4 w-[1px] bg-slate-200 shrink-0" />
-                <button
-                  type="button"
-                  onClick={() => {
-                    onDeleteAnnotations?.(selectedAnnotationIds);
-                    setSelectedAnnotationIds([]);
-                  }}
-                  className="p-1.5 hover:bg-rose-50 rounded-lg text-slate-500 hover:text-rose-600 cursor-pointer"
-                  title={t('deleteBtn')}
-                >
-                  <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                </button>
-              </>
-            )}
-
-            {/* Quick Color Swatches for Selected People */}
-            {selectedPersonIds.length > 0 && (
-              <>
-                <div className="h-4 w-[1px] bg-slate-200 shrink-0" />
-                <div className="flex items-center gap-1 shrink-0">
-                  {CARD_COLORS.slice(0, 6).map((c) => (
-                    <button
-                      key={c.value}
-                      type="button"
-                      onClick={() => onBatchUpdatePeople(selectedPersonIds, { cardColor: c.value })}
-                      className="w-4 h-4 rounded-full border border-white shadow-2xs hover:scale-120 transition-transform cursor-pointer"
-                      style={{ backgroundColor: c.value }}
-                      title={c.name}
-                    />
-                  ))}
-                </div>
-
-                <div className="h-4 w-[1px] bg-slate-200 shrink-0" />
-
-                {/* Duplicate & Remove */}
-                <button
-                  type="button"
-                  onClick={() => onDuplicatePeople(selectedPersonIds, 36, 36)}
-                  className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 cursor-pointer"
-                  title={t('duplicateCards')}
-                >
-                  <Copy className="w-3.5 h-3.5" strokeWidth={1.5} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onBatchRemoveFromCanvas(selectedPersonIds);
-                    setSelectedPersonIds([]);
-                  }}
-                  className="p-1.5 hover:bg-rose-50 rounded-lg text-slate-500 hover:text-rose-600 cursor-pointer"
-                  title={t('removeCardsFromCanvas')}
-                >
-                  <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                </button>
-              </>
-            )}
-          </div>
-        )}
 
       {/* Shared SVG Filter Defs */}
       <svg className="absolute w-0 h-0 pointer-events-none" aria-hidden="true">
@@ -2594,9 +2798,9 @@ export const Canvas: React.FC<CanvasProps> = ({
                 e.stopPropagation();
                 onEditFrame(frame);
               }}
-              className={`absolute top-0 left-0 rounded-2xl border-2 border-dashed pointer-events-auto select-none transition-shadow ${
-                isFrameSelected ? 'ring-3 ring-blue-500/30 shadow-lg' : ''
-              } ${frame.locked ? 'cursor-default' : 'cursor-move'}`}
+                className={`group absolute top-0 left-0 rounded-2xl border-2 border-dashed pointer-events-auto select-none transition-shadow ${
+                  isFrameSelected ? 'ring-3 ring-blue-500/30 shadow-lg' : ''
+                } ${frame.locked ? 'cursor-default' : 'cursor-move'}`}
             >
               {/* Frame Title Bar */}
               <div
@@ -2613,6 +2817,24 @@ export const Canvas: React.FC<CanvasProps> = ({
                   <span className="text-[10px] font-normal opacity-75">· {frame.subtitle}</span>
                 )}
               </div>
+
+              {/* Hover Unlock Button in Top-Right Corner when Frame is Locked (Module 2.2) */}
+              {frame.locked && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleLockItem('frame', frame.id);
+                  }}
+                  className="absolute top-2 right-2 px-2 py-1 rounded-lg bg-amber-500/90 hover:bg-amber-600 text-white text-[10px] font-bold shadow-md flex items-center gap-1 opacity-0 hover:opacity-100 group-hover:opacity-100 transition-opacity cursor-pointer z-20"
+                  style={{ opacity: isFrameSelected ? 1 : undefined }}
+                  title="点击解锁此阵营框 (Ctrl+L)"
+                >
+                  <Lock className="w-3 h-3" />
+                  <span>已锁定 · 点击解锁</span>
+                </button>
+              )}
 
               {/* Bottom-Right Resize Handle */}
               {!frame.locked && (
@@ -2804,18 +3026,43 @@ export const Canvas: React.FC<CanvasProps> = ({
                   }}
                 />
 
+                {isPathEdge && (
+                  <path
+                    d={path}
+                    fill="none"
+                    stroke="#818CF8"
+                    strokeWidth={strokeWidth + 6}
+                    strokeLinecap="round"
+                    opacity={0.28}
+                    className="animate-pulse"
+                  />
+                )}
+
+                {snapshotDiffResult?.addedRelIdSet.has(rel.id) && (
+                  <path
+                    d={path}
+                    fill="none"
+                    stroke="#10B981"
+                    strokeWidth={strokeWidth + 5}
+                    strokeLinecap="round"
+                    opacity={0.35}
+                  />
+                )}
+
                 <path
                   d={path}
                   fill="none"
-                  stroke={baseStrokeColor}
+                  stroke={
+                    snapshotDiffResult?.addedRelIdSet.has(rel.id)
+                      ? '#10B981'
+                      : baseStrokeColor
+                  }
                   strokeWidth={strokeWidth}
-                  strokeDasharray={dashArray}
+                  strokeDasharray={isPathEdge ? '10,6' : dashArray}
                   strokeLinecap="round"
                   filter={strokeFilter}
                   className={`transition-colors duration-200 ${
-                    isPathEdge
-                      ? 'animate-pulse'
-                      : activeLineConfig.animated
+                    isPathEdge || activeLineConfig.animated
                       ? 'animate-flow-dash'
                       : 'group-hover:opacity-90'
                   }`}
@@ -3003,11 +3250,20 @@ export const Canvas: React.FC<CanvasProps> = ({
                 zIndex: isCardFocused || isCardInPath ? 900 : (person.zIndex ?? 100),
                 backgroundColor:
                   activeCardConfig.accentStyle === 'full'
-                    ? `${person.cardColor || '#3B82F6'}15`
-                    : undefined,
+                    ? `${person.cardColor || '#3B82F6'}18`
+                    : activeCardConfig.customBgColor || undefined,
                 borderColor:
                   activeCardConfig.accentStyle === 'frame'
                     ? person.cardColor || '#3B82F6'
+                    : activeCardConfig.customBorderColor || undefined,
+                borderWidth:
+                  activeCardConfig.customBorderWidth !== undefined
+                    ? `${activeCardConfig.customBorderWidth}px`
+                    : undefined,
+                borderStyle: activeCardConfig.customBorderStyle || undefined,
+                borderRadius:
+                  activeCardConfig.customBorderRadius !== undefined
+                    ? `${activeCardConfig.customBorderRadius}px`
                     : undefined,
               }}
               onMouseEnter={() => setHoveredCardId(person.id)}
@@ -3036,6 +3292,53 @@ export const Canvas: React.FC<CanvasProps> = ({
                   : activeCardConfig.borderClass
               }`}
             >
+              {/* Module 1.1: Breakthrough Path Node Order Badge */}
+              {pathNodeOrderMap?.has(person.id) && (
+                <div className="absolute -top-3 -left-3 z-30 flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[10px] font-extrabold shadow-lg ring-2 ring-white">
+                  <span>#{pathNodeOrderMap.get(person.id)}</span>
+                  <span>
+                    {pathNodeOrderMap.get(person.id) === 1
+                      ? '起点'
+                      : pathNodeOrderMap.get(person.id) === highlightedPathIds?.length
+                      ? '目标'
+                      : '引荐'}
+                  </span>
+                </div>
+              )}
+
+              {/* Module 1.3: Snapshot Diff Visual Badges on Person Card */}
+              {snapshotDiffResult?.personDiffMap.has(person.id) &&
+                (() => {
+                  const diffBadge = snapshotDiffResult.personDiffMap.get(person.id)!;
+                  return (
+                    <div
+                      className={`absolute -top-3 left-1/2 -translate-x-1/2 z-30 px-2 py-0.5 rounded-full text-white text-[10px] font-extrabold shadow-md ring-2 whitespace-nowrap ${
+                        diffBadge.status === 'downgraded'
+                          ? 'bg-rose-600 ring-rose-200'
+                          : 'bg-emerald-600 ring-emerald-200'
+                      }`}
+                    >
+                      {diffBadge.badgeText}
+                    </div>
+                  );
+                })()}
+
+              {/* Hover Unlock Button when Person is Locked */}
+              {person.locked && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleLockItem('person', person.id);
+                  }}
+                  className="absolute -top-2.5 -right-2.5 w-6 h-6 rounded-full bg-amber-500 hover:bg-amber-600 text-white shadow-md flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer z-30"
+                  title="点击解锁此人物卡 (Ctrl+L)"
+                >
+                  <Lock className="w-3 h-3" />
+                </button>
+              )}
+
               {activeCardConfig.accentStyle === 'bar' && (
                 <div
                   className="h-1.5 w-full rounded-t-xl"
@@ -3228,6 +3531,15 @@ export const Canvas: React.FC<CanvasProps> = ({
             const stampMeta =
               TACTICAL_STAMPS.find((s) => s.key === ann.stamp) || TACTICAL_STAMPS[0];
             const isEditing = editingStickyId === ann.id;
+            const displayStampLabel =
+              ann.stampLabel && ann.stampLabel.trim()
+                ? ann.stampLabel.trim()
+                : language === 'zh'
+                ? stampMeta.labelZh
+                : stampMeta.labelEn;
+            const displayAccentColor = ann.color || stampMeta.color;
+            const displayBgColor = ann.bgColor || stampMeta.bg;
+
             return (
               <div
                 key={ann.id}
@@ -3236,14 +3548,15 @@ export const Canvas: React.FC<CanvasProps> = ({
                   width: ann.width,
                   minHeight: ann.height,
                   zIndex: ann.zIndex ?? 155,
-                  borderColor: isAnnSelected ? '#2563EB' : ann.color || stampMeta.color,
-                  backgroundColor: stampMeta.bg,
+                  borderColor: isAnnSelected ? '#2563EB' : displayAccentColor,
+                  backgroundColor: displayBgColor,
                 }}
                 onMouseDown={(e) => handleAnnotationMouseDown(e, ann)}
                 onContextMenu={(e) => openContextMenu(e, 'annotation', ann.id)}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
                   if (!ann.locked) {
+                    onBeforeInlineEdit?.();
                     setEditingStickyId(ann.id);
                   }
                 }}
@@ -3254,34 +3567,26 @@ export const Canvas: React.FC<CanvasProps> = ({
                 <div>
                   <div className="flex items-center justify-between gap-1.5 mb-2">
                     <span
-                      className="px-2 py-0.5 rounded-md text-[10px] font-bold text-white shadow-2xs"
-                      style={{ backgroundColor: ann.color || stampMeta.color }}
+                      className="px-2 py-0.5 rounded-md text-[10px] font-bold text-white shadow-2xs truncate max-w-[165px]"
+                      style={{ backgroundColor: displayAccentColor }}
                     >
-                      {language === 'zh' ? stampMeta.labelZh : stampMeta.labelEn}
+                      {displayStampLabel}
                     </span>
-                    <div className="flex items-center gap-1">
-                      {ann.locked && <Lock className="w-3 h-3 text-amber-600" strokeWidth={1.5} />}
-                      <span className="text-[9px] text-slate-400 font-mono">
-                        {language === 'zh' ? '双击编辑' : 'Double-click'}
-                      </span>
-                    </div>
+                    {ann.locked && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Lock className="w-3 h-3 text-amber-600" strokeWidth={1.5} />
+                      </div>
+                    )}
                   </div>
 
                   {isEditing ? (
-                    <textarea
-                      autoFocus
-                      value={ann.text || ''}
-                      onChange={(e) => onUpdateAnnotation?.(ann.id, { text: e.target.value })}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Escape') {
-                          setEditingStickyId(null);
-                        }
-                      }}
-                      onBlur={() => setEditingStickyId(null)}
-                      rows={3}
-                      className="w-full bg-white/80 border border-slate-300 rounded-lg p-1.5 text-xs text-slate-900 font-medium focus:outline-none focus:border-blue-500 resize-none leading-relaxed"
+                    <StickyNoteInlineEditor
+                      ann={ann}
+                      defaultStampLabel={language === 'zh' ? stampMeta.labelZh : stampMeta.labelEn}
+                      displayAccentColor={displayAccentColor}
+                      displayBgColor={displayBgColor}
+                      onUpdateAnnotation={onUpdateAnnotation}
+                      onFinishEditing={() => setEditingStickyId(null)}
                     />
                   ) : (
                     <p className="text-xs font-medium text-slate-800 whitespace-pre-wrap break-words leading-relaxed">
@@ -3311,25 +3616,39 @@ export const Canvas: React.FC<CanvasProps> = ({
             );
           }
 
-          // Vector SVG annotation: Pen, Highlighter, or Smart Shape
+          // Vector SVG / Shape / Text Annotation: supports rotation, 8-point perimeter corner/edge stretching, and double-click multiline text input (Shift+Enter for newline)
           const isPointerInteractive =
             toolMode === 'select' ||
             toolMode === 'eraser' ||
             toolMode === 'marquee' ||
             toolMode === 'lasso';
 
+          const boxW = Math.max(24, ann.width);
+          const boxH = Math.max(24, ann.height);
+          const isEditingShapeOrText = editingStickyId === ann.id;
+          const rotDeg = ann.rotation || 0;
+
           return (
             <div
               key={ann.id}
               style={{
-                transform: `translate3d(${ann.x}px, ${ann.y}px, 0)`,
-                width: Math.max(24, ann.width),
-                height: Math.max(24, ann.height),
-                zIndex: ann.zIndex ?? (ann.kind === 'highlighter' ? 135 : 145),
+                transform: `translate3d(${ann.x}px, ${ann.y}px, 0) rotate(${rotDeg}deg)`,
+                transformOrigin: 'center center',
+                width: boxW,
+                height: boxH,
+                zIndex: ann.zIndex ?? (ann.kind === 'highlighter' ? 135 : 148),
                 mixBlendMode: ann.kind === 'highlighter' ? 'multiply' : 'normal',
               }}
               onMouseDown={(e) => handleAnnotationMouseDown(e, ann)}
               onContextMenu={(e) => openContextMenu(e, 'annotation', ann.id)}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                if (!ann.locked && (ann.kind === 'shape' || ann.kind === 'text')) {
+                  onBeforeInlineEdit?.();
+                  setSelectedAnnotationIds([ann.id]);
+                  setEditingStickyId(ann.id);
+                }
+              }}
               className={`absolute top-0 left-0 select-none ${
                 isPointerInteractive ? 'pointer-events-auto' : 'pointer-events-none'
               } ${
@@ -3340,134 +3659,296 @@ export const Canvas: React.FC<CanvasProps> = ({
                   : 'cursor-move'
               } ${
                 isAnnSelected
-                  ? 'ring-2 ring-blue-500 ring-offset-2 rounded-lg bg-blue-500/5'
+                  ? 'ring-2 ring-blue-500 ring-offset-1 rounded-sm bg-blue-500/5'
                   : ''
               }`}
             >
-              <svg
-                className="w-full h-full overflow-visible"
-                viewBox={`0 0 ${Math.max(24, ann.width)} ${Math.max(24, ann.height)}`}
-              >
-                {(ann.kind === 'pen' || ann.kind === 'highlighter') && ann.points && (
-                  <>
-                    {/* Transparent hit target path */}
-                    <path
-                      d={generateSmoothSvgPathFromNormalized(
-                        ann.points,
-                        0,
-                        0,
-                        Math.max(24, ann.width),
-                        Math.max(24, ann.height)
-                      )}
-                      fill="none"
-                      stroke="transparent"
-                      strokeWidth={Math.max(18, ann.strokeWidth + 10)}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d={generateSmoothSvgPathFromNormalized(
-                        ann.points,
-                        0,
-                        0,
-                        Math.max(24, ann.width),
-                        Math.max(24, ann.height)
-                      )}
-                      fill="none"
-                      stroke={ann.color}
-                      strokeWidth={ann.strokeWidth}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      opacity={ann.opacity}
-                    />
-                  </>
-                )}
-
-                {ann.kind === 'shape' && ann.shapeType === 'ellipse' && (
-                  <ellipse
-                    cx={ann.width / 2}
-                    cy={ann.height / 2}
-                    rx={Math.max(8, ann.width / 2 - ann.strokeWidth)}
-                    ry={Math.max(8, ann.height / 2 - ann.strokeWidth)}
-                    fill={`${ann.color}12`}
-                    stroke={ann.color}
-                    strokeWidth={ann.strokeWidth}
-                  />
-                )}
-
-                {ann.kind === 'shape' && ann.shapeType === 'rect' && (
-                  <rect
-                    x={ann.strokeWidth / 2}
-                    y={ann.strokeWidth / 2}
-                    width={Math.max(12, ann.width - ann.strokeWidth)}
-                    height={Math.max(12, ann.height - ann.strokeWidth)}
-                    rx={10}
-                    fill={`${ann.color}12`}
-                    stroke={ann.color}
-                    strokeWidth={ann.strokeWidth}
-                  />
-                )}
-
-                {ann.kind === 'shape' &&
-                  (ann.shapeType === 'line' || ann.shapeType === 'arrow') &&
-                  (() => {
-                    const startPt = ann.arrowStart || ann.points?.[0] || { x: 0, y: 0.5 };
-                    const endPt = ann.arrowEnd || ann.points?.[1] || { x: 1, y: 0.5 };
-                    const sx = startPt.x * ann.width;
-                    const sy = startPt.y * ann.height;
-                    const ex = endPt.x * ann.width;
-                    const ey = endPt.y * ann.height;
-                    const angle = Math.atan2(ey - sy, ex - sx);
-                    const headLen = Math.max(12, ann.strokeWidth * 3.4);
-                    const p1x = ex - headLen * Math.cos(angle - Math.PI / 6);
-                    const p1y = ey - headLen * Math.sin(angle - Math.PI / 6);
-                    const p2x = ex - headLen * Math.cos(angle + Math.PI / 6);
-                    const p2y = ey - headLen * Math.sin(angle + Math.PI / 6);
-                    return (
-                      <g>
-                        <line
-                          x1={sx}
-                          y1={sy}
-                          x2={ex}
-                          y2={ey}
-                          stroke="transparent"
-                          strokeWidth={20}
-                        />
-                        <line
-                          x1={sx}
-                          y1={sy}
-                          x2={ex}
-                          y2={ey}
-                          stroke={ann.color}
-                          strokeWidth={ann.strokeWidth}
-                          strokeLinecap="round"
-                        />
-                        {ann.shapeType === 'arrow' && (
-                          <polygon
-                            points={`${ex},${ey} ${p1x},${p1y} ${p2x},${p2y}`}
-                            fill={ann.color}
-                          />
+              {/* SVG Layer for Pen, Highlighter, and Geometric Shapes */}
+              {ann.kind !== 'text' && (
+                <svg
+                  className="w-full h-full overflow-visible"
+                  viewBox={`0 0 ${boxW} ${boxH}`}
+                >
+                  {(ann.kind === 'pen' || ann.kind === 'highlighter') && ann.points && (
+                    <>
+                      <path
+                        d={generateSmoothSvgPathFromNormalized(
+                          ann.points,
+                          0,
+                          0,
+                          boxW,
+                          boxH
                         )}
-                      </g>
-                    );
-                  })()}
-              </svg>
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={Math.max(18, ann.strokeWidth + 10)}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d={generateSmoothSvgPathFromNormalized(
+                          ann.points,
+                          0,
+                          0,
+                          boxW,
+                          boxH
+                        )}
+                        fill="none"
+                        stroke={ann.color}
+                        strokeWidth={ann.strokeWidth}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        opacity={ann.opacity}
+                      />
+                      {ann.kind === 'pen' &&
+                        (ann.arrow === 'forward' || ann.arrow === 'both') &&
+                        ann.points.length >= 2 &&
+                        (() => {
+                          const localPts = ann.points.map((np) => ({
+                            x: np.x * boxW,
+                            y: np.y * boxH,
+                          }));
+                          const endArrow = computeNaturalArrowhead(
+                            localPts,
+                            ann.strokeWidth,
+                            'end'
+                          );
+                          const startArrow =
+                            ann.arrow === 'both'
+                              ? computeNaturalArrowhead(localPts, ann.strokeWidth, 'start')
+                              : null;
+                          return (
+                            <>
+                              {endArrow && (
+                                <polygon
+                                  points={endArrow.polygonPoints}
+                                  fill={ann.color}
+                                  opacity={ann.opacity}
+                                />
+                              )}
+                              {startArrow && (
+                                <polygon
+                                  points={startArrow.polygonPoints}
+                                  fill={ann.color}
+                                  opacity={ann.opacity}
+                                />
+                              )}
+                            </>
+                          );
+                        })()}
+                    </>
+                  )}
 
-              {/* Resize Handle when selected */}
+                  {ann.kind === 'shape' &&
+                    ann.shapeType !== 'line' &&
+                    ann.shapeType !== 'arrow' &&
+                    (() => {
+                      const { mainPath, detailPath } = buildCommonShapeSvgPath(
+                        ann.shapeType || 'rect',
+                        boxW,
+                        boxH,
+                        ann.strokeWidth
+                      );
+                      const fillCol = ann.bgColor ? ann.bgColor : `${ann.color}16`;
+                      return (
+                        <g>
+                          <path
+                            d={mainPath}
+                            fill={fillCol}
+                            stroke={ann.color}
+                            strokeWidth={ann.strokeWidth}
+                            strokeLinejoin="round"
+                          />
+                          {detailPath && (
+                            <path
+                              d={detailPath}
+                              fill="none"
+                              stroke={ann.color}
+                              strokeWidth={ann.strokeWidth}
+                              strokeLinejoin="round"
+                            />
+                          )}
+                        </g>
+                      );
+                    })()}
+
+                  {ann.kind === 'shape' &&
+                    (ann.shapeType === 'line' || ann.shapeType === 'arrow') &&
+                    (() => {
+                      const startPt = ann.arrowStart || ann.points?.[0] || { x: 0, y: 0.5 };
+                      const endPt = ann.arrowEnd || ann.points?.[1] || { x: 1, y: 0.5 };
+                      const sx = startPt.x * boxW;
+                      const sy = startPt.y * boxH;
+                      const ex = endPt.x * boxW;
+                      const ey = endPt.y * boxH;
+                      const segPts = [
+                        { x: sx, y: sy },
+                        { x: ex, y: ey },
+                      ];
+
+                      const showEndArrow =
+                        ann.arrow === 'forward' ||
+                        ann.arrow === 'both' ||
+                        (!ann.arrow && ann.shapeType === 'arrow');
+                      const showStartArrow = ann.arrow === 'both';
+
+                      const endArrow = showEndArrow
+                        ? computeNaturalArrowhead(segPts, ann.strokeWidth, 'end')
+                        : null;
+                      const startArrow = showStartArrow
+                        ? computeNaturalArrowhead(segPts, ann.strokeWidth, 'start')
+                        : null;
+
+                      return (
+                        <g>
+                          <line
+                            x1={sx}
+                            y1={sy}
+                            x2={ex}
+                            y2={ey}
+                            stroke="transparent"
+                            strokeWidth={20}
+                          />
+                          <line
+                            x1={sx}
+                            y1={sy}
+                            x2={ex}
+                            y2={ey}
+                            stroke={ann.color}
+                            strokeWidth={ann.strokeWidth}
+                            strokeLinecap="round"
+                          />
+                          {endArrow && (
+                            <polygon
+                              points={endArrow.polygonPoints}
+                              fill={ann.color}
+                            />
+                          )}
+                          {startArrow && (
+                            <polygon
+                              points={startArrow.polygonPoints}
+                              fill={ann.color}
+                            />
+                          )}
+                        </g>
+                      );
+                    })()}
+                </svg>
+              )}
+
+              {/* Double-Click Inline Text Editor & Auto-Wrapping Text Overlay for Shapes and Text Annotations */}
+              {(ann.kind === 'shape' || ann.kind === 'text') &&
+                ann.shapeType !== 'line' &&
+                ann.shapeType !== 'arrow' && (
+                  <div
+                    style={{
+                      backgroundColor:
+                        ann.kind === 'text' && ann.bgColor && ann.bgColor !== 'transparent'
+                          ? ann.bgColor
+                          : undefined,
+                    }}
+                    className={`absolute inset-0 flex items-center justify-center p-2.5 overflow-hidden ${
+                      ann.kind === 'text'
+                        ? 'rounded-lg border border-dashed border-transparent hover:border-slate-300/80'
+                        : ''
+                    }`}
+                  >
+                    {isEditingShapeOrText ? (
+                      <ShapeTextInlineEditor
+                        ann={ann}
+                        onUpdateAnnotation={onUpdateAnnotation}
+                        onFinishEditing={() => setEditingStickyId(null)}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          color: ann.color,
+                          fontSize: `${ann.fontSize || 14}px`,
+                        }}
+                        className={`w-full max-h-full overflow-hidden font-semibold leading-snug whitespace-pre-wrap break-words pointer-events-none ${
+                          ann.kind === 'text' ? 'text-left' : 'text-center'
+                        }`}
+                      >
+                        {ann.text ||
+                          (ann.kind === 'text'
+                            ? language === 'zh'
+                              ? '双击输入文本…'
+                              : 'Double-click to type...'
+                            : '')}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              {/* Rotation Handle & 8 Perimeter Corner/Edge Stretch Handles when selected */}
               {isAnnSelected && !ann.locked && (
-                <div
-                  onMouseDown={(e) => {
-                    e.stopPropagation();
-                    setResizingAnnotationId(ann.id);
-                    resizeStartMouseRef.current = { x: e.clientX, y: e.clientY };
-                    resizeInitialAnnotationRef.current = {
-                      width: ann.width,
-                      height: ann.height,
-                    };
-                  }}
-                  className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 rounded-full bg-blue-600 border-2 border-white shadow-xs cursor-nwse-resize"
-                  title={language === 'zh' ? '拖拽缩放图形尺寸' : 'Drag to resize'}
-                />
+                <>
+                  {/* Top Rotation Stem & Handle */}
+                  <div className="absolute -top-7 left-1/2 -translate-x-1/2 flex flex-col items-center z-30">
+                    <div
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        setRotatingAnnotationState({
+                          id: ann.id,
+                          centerX: ann.x + boxW / 2,
+                          centerY: ann.y + boxH / 2,
+                        });
+                      }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        onUpdateAnnotation?.(ann.id, { rotation: 0 });
+                      }}
+                      className="w-5 h-5 rounded-full bg-white border-2 border-blue-600 shadow-md flex items-center justify-center cursor-grab active:cursor-grabbing hover:bg-blue-50 hover:scale-110 transition-transform"
+                      title={
+                        language === 'zh'
+                          ? `拖拽旋转角度 (当前 ${Math.round(rotDeg)}° · Shift锁定15° · 双击归零)`
+                          : `Drag to rotate (${Math.round(rotDeg)}° · Double-click to reset)`
+                      }
+                    >
+                      <RotateCw className="w-2.5 h-2.5 text-blue-600" strokeWidth={2.2} />
+                    </div>
+                    <div className="w-[1.5px] h-2 bg-blue-500" />
+                    {(rotatingAnnotationState?.id === ann.id || rotDeg !== 0) && (
+                      <div className="absolute -top-5 px-1.5 py-0.2 bg-slate-900 text-white text-[9px] font-mono rounded shadow-xs whitespace-nowrap pointer-events-none">
+                        {Math.round(rotDeg)}°
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 8 Perimeter Corner & Edge Stretch Handles (nw, n, ne, e, se, s, sw, w) */}
+                  {(
+                    [
+                      { key: 'nw', posClass: '-top-1.5 -left-1.5', cursor: 'cursor-nwse-resize' },
+                      { key: 'n', posClass: '-top-1.5 left-1/2 -translate-x-1/2', cursor: 'cursor-ns-resize' },
+                      { key: 'ne', posClass: '-top-1.5 -right-1.5', cursor: 'cursor-nesw-resize' },
+                      { key: 'e', posClass: 'top-1/2 -right-1.5 -translate-y-1/2', cursor: 'cursor-ew-resize' },
+                      { key: 'se', posClass: '-bottom-1.5 -right-1.5', cursor: 'cursor-nwse-resize' },
+                      { key: 's', posClass: '-bottom-1.5 left-1/2 -translate-x-1/2', cursor: 'cursor-ns-resize' },
+                      { key: 'sw', posClass: '-bottom-1.5 -left-1.5', cursor: 'cursor-nesw-resize' },
+                      { key: 'w', posClass: 'top-1/2 -left-1.5 -translate-y-1/2', cursor: 'cursor-ew-resize' },
+                    ] as const
+                  ).map((h) => (
+                    <div
+                      key={h.key}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        setResizingAnnotationState({
+                          id: ann.id,
+                          handle: h.key,
+                          startMouseX: e.clientX,
+                          startMouseY: e.clientY,
+                          startX: ann.x,
+                          startY: ann.y,
+                          startW: boxW,
+                          startH: boxH,
+                          rotation: rotDeg,
+                        });
+                      }}
+                      className={`absolute ${h.posClass} w-3 h-3 rounded-xs bg-white border-2 border-blue-600 shadow-2xs hover:bg-blue-600 hover:scale-125 transition-transform z-20 ${h.cursor}`}
+                      title={language === 'zh' ? '拖拽角点或边点自由拉伸尺寸' : 'Drag handle to stretch'}
+                    />
+                  ))}
+                </>
               )}
             </div>
           );
@@ -3478,97 +3959,598 @@ export const Canvas: React.FC<CanvasProps> = ({
           className="absolute top-0 left-0 overflow-visible pointer-events-none"
           style={{ width: 1, height: 1, zIndex: 999 }}
         >
-          {/* Active Freehand Pen or Highlighter Stroke Preview */}
-          {drawingStrokePoints && drawingStrokePoints.length > 1 && (
-            <path
-              d={generateSmoothSvgPath(drawingStrokePoints)}
-              fill="none"
-              stroke={penColor}
-              strokeWidth={
-                toolMode === 'highlighter' ? Math.max(16, penStrokeWidth * 3.5) : penStrokeWidth
+          {/* Sticky Note Callout Leader Lines (作战便签引出线：支持四角/边中点拾取、多折角点拖拽移动与编辑、人物/分组框角点磁吸) */}
+          {visibleAnnotations
+            .filter((ann) => ann.kind === 'sticky' && ann.calloutEnabled)
+            .map((ann) => {
+              const stampMeta =
+                TACTICAL_STAMPS.find((s) => s.key === ann.stamp) || TACTICAL_STAMPS[0];
+              const accentColor = ann.color || stampMeta.color;
+
+              let targetOverride: Point | undefined = undefined;
+              let linkedPersonName: string | undefined = undefined;
+              if (ann.calloutTargetPersonId) {
+                const targetPerson = peopleMap.get(ann.calloutTargetPersonId);
+                if (targetPerson && targetPerson.onCanvas && !targetPerson.hidden) {
+                  linkedPersonName = targetPerson.name;
+                  if (ann.calloutTargetNorm) {
+                    targetOverride = {
+                      x: targetPerson.x + ann.calloutTargetNorm.x * CARD_WIDTH,
+                      y: targetPerson.y + ann.calloutTargetNorm.y * CARD_HEIGHT,
+                    };
+                  } else {
+                    const stickyCenter = {
+                      x: ann.x + ann.width / 2,
+                      y: ann.y + ann.height / 2,
+                    };
+                    const anchor = getClosestAnchor(stickyCenter, {
+                      x: targetPerson.x,
+                      y: targetPerson.y,
+                      width: CARD_WIDTH,
+                      height: CARD_HEIGHT,
+                    });
+                    targetOverride = getAnchorPoint(
+                      {
+                        x: targetPerson.x,
+                        y: targetPerson.y,
+                        width: CARD_WIDTH,
+                        height: CARD_HEIGHT,
+                      },
+                      anchor
+                    );
+                  }
+                }
               }
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              opacity={toolMode === 'highlighter' ? 0.38 : 0.95}
-            />
+
+              const callout = computeStickyCalloutGeometry(ann, targetOverride);
+              const isSelected =
+                selectedAnnotationIds.includes(ann.id) ||
+                editingStickyId === ann.id ||
+                draggingCalloutState?.annotationId === ann.id;
+              const isDraggingStart =
+                draggingCalloutState?.annotationId === ann.id &&
+                draggingCalloutState?.handleType === 'start';
+              const isDraggingEnd =
+                draggingCalloutState?.annotationId === ann.id &&
+                draggingCalloutState?.handleType === 'end';
+              const stickyKeyPoints = getBoxCornerAndEdgePoints(ann);
+
+              return (
+                <g key={`sticky-callout-${ann.id}`}>
+                  {/* Subtle glow under callout line */}
+                  <path
+                    d={callout.pathD}
+                    fill="none"
+                    stroke={accentColor}
+                    strokeWidth={isSelected ? 5.5 : 3.5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    opacity={0.18}
+                  />
+                  {/* Main Callout Multi-Vertex Leader Path (without front arrowhead) */}
+                  <path
+                    d={callout.pathD}
+                    fill="none"
+                    stroke={accentColor}
+                    strokeWidth={2.2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeDasharray={ann.calloutStyle === 'dashed' ? '6,4' : undefined}
+                  />
+
+                  {/* Pickable 4 Corners & 4 Edge Midpoints on Sticky Note when selected or dragging start */}
+                  {!ann.locked &&
+                    (isSelected || isDraggingStart) &&
+                    stickyKeyPoints.map((kp, kpIdx) => {
+                      const isCurrentOrigin =
+                        Math.hypot(callout.startNorm.x - kp.nx, callout.startNorm.y - kp.ny) <
+                        0.05;
+                      return (
+                        <g
+                          key={`sticky-kp-${ann.id}-${kpIdx}`}
+                          className="pointer-events-auto cursor-pointer"
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            setSelectedAnnotationIds([ann.id]);
+                            onUpdateAnnotation?.(ann.id, {
+                              calloutStartNorm: { x: kp.nx, y: kp.ny },
+                            });
+                            setDraggingCalloutState({
+                              annotationId: ann.id,
+                              handleType: 'start',
+                            });
+                          }}
+                        >
+                          <circle cx={kp.x} cy={kp.y} r={9} fill="transparent" />
+                          {kp.isCorner ? (
+                            <rect
+                              x={kp.x - (isCurrentOrigin ? 4.5 : 3.5)}
+                              y={kp.y - (isCurrentOrigin ? 4.5 : 3.5)}
+                              width={isCurrentOrigin ? 9 : 7}
+                              height={isCurrentOrigin ? 9 : 7}
+                              rx={1.5}
+                              transform={`rotate(45 ${kp.x} ${kp.y})`}
+                              fill={isCurrentOrigin ? accentColor : '#FFFFFF'}
+                              stroke={accentColor}
+                              strokeWidth={1.8}
+                              opacity={isCurrentOrigin || isDraggingStart ? 1 : 0.75}
+                            />
+                          ) : (
+                            <circle
+                              cx={kp.x}
+                              cy={kp.y}
+                              r={isCurrentOrigin ? 4.2 : 3}
+                              fill={isCurrentOrigin ? accentColor : '#FFFFFF'}
+                              stroke={accentColor}
+                              strokeWidth={1.6}
+                              opacity={isCurrentOrigin || isDraggingStart ? 1 : 0.65}
+                            />
+                          )}
+                          <title>
+                            {language === 'zh'
+                              ? `点击或拖拽拾取便签${kp.labelZh}作为引出线起点`
+                              : `Pick sticky note ${kp.isCorner ? 'corner' : 'edge midpoint'} as callout origin`}
+                          </title>
+                        </g>
+                      );
+                    })}
+
+                  {/* When dragging Target Pin, show pickable 4 Corners & 4 Edge Midpoints on nearby Person cards */}
+                  {isDraggingEnd &&
+                    canvasPeople.map((person) => {
+                      const nearPerson =
+                        callout.endPt.x >= person.x - 90 &&
+                        callout.endPt.x <= person.x + CARD_WIDTH + 90 &&
+                        callout.endPt.y >= person.y - 90 &&
+                        callout.endPt.y <= person.y + CARD_HEIGHT + 90;
+                      if (!nearPerson) return null;
+                      const personKeyPts = getBoxCornerAndEdgePoints({
+                        x: person.x,
+                        y: person.y,
+                        width: CARD_WIDTH,
+                        height: CARD_HEIGHT,
+                      });
+                      return (
+                        <g key={`target-snap-person-${person.id}`}>
+                          {personKeyPts.map((pkp, idx) => {
+                            const isSnappedHere =
+                              ann.calloutTargetPersonId === person.id &&
+                              ann.calloutTargetNorm &&
+                              Math.hypot(
+                                ann.calloutTargetNorm.x - pkp.nx,
+                                ann.calloutTargetNorm.y - pkp.ny
+                              ) < 0.05;
+                            return (
+                              <circle
+                                key={idx}
+                                cx={pkp.x}
+                                cy={pkp.y}
+                                r={isSnappedHere ? 6 : pkp.isCorner ? 4.5 : 3.5}
+                                fill={isSnappedHere ? accentColor : '#FFFFFF'}
+                                stroke={accentColor}
+                                strokeWidth={2}
+                                opacity={0.9}
+                              />
+                            );
+                          })}
+                        </g>
+                      );
+                    })}
+
+                  {/* Draggable Origin Handle on Sticky Note Perimeter */}
+                  {!ann.locked && (
+                    <g
+                      className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        setSelectedAnnotationIds([ann.id]);
+                        setDraggingCalloutState({
+                          annotationId: ann.id,
+                          handleType: 'start',
+                        });
+                      }}
+                    >
+                      <circle
+                        cx={callout.startPt.x}
+                        cy={callout.startPt.y}
+                        r={10}
+                        fill="transparent"
+                      />
+                      <circle
+                        cx={callout.startPt.x}
+                        cy={callout.startPt.y}
+                        r={isSelected ? 5 : 4}
+                        fill="#FFFFFF"
+                        stroke={accentColor}
+                        strokeWidth={2.2}
+                      />
+                      <title>
+                        {language === 'zh'
+                          ? '拖拽沿便签边缘移动引出线起点（自动磁吸四个角点与边中点）'
+                          : 'Drag along sticky note perimeter to move origin (snaps to 4 corners & edge midpoints)'}
+                      </title>
+                    </g>
+                  )}
+
+                  {/* Movable & Editable Intermediate Corner/Elbow Vertices (折角点手柄) */}
+                  {callout.elbowPts.map((elbowPt, elbowIdx) => (
+                    <g
+                      key={`callout-elbow-${ann.id}-${elbowIdx}`}
+                      className={
+                        ann.locked
+                          ? 'pointer-events-none'
+                          : 'pointer-events-auto cursor-move'
+                      }
+                      onMouseDown={(e) => {
+                        if (ann.locked) return;
+                        e.stopPropagation();
+                        setSelectedAnnotationIds([ann.id]);
+                        setDraggingCalloutState({
+                          annotationId: ann.id,
+                          handleType: 'elbow',
+                          elbowIndex: elbowIdx,
+                        });
+                      }}
+                      onDoubleClick={(e) => {
+                        if (ann.locked) return;
+                        e.stopPropagation();
+                        const nextElbows = callout.elbowOffsets.filter(
+                          (_, i) => i !== elbowIdx
+                        );
+                        onUpdateAnnotation?.(ann.id, {
+                          calloutElbows: nextElbows,
+                        });
+                      }}
+                      onContextMenu={(e) => {
+                        if (ann.locked) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const nextElbows = callout.elbowOffsets.filter(
+                          (_, i) => i !== elbowIdx
+                        );
+                        onUpdateAnnotation?.(ann.id, {
+                          calloutElbows: nextElbows,
+                        });
+                      }}
+                    >
+                      <circle cx={elbowPt.x} cy={elbowPt.y} r={11} fill="transparent" />
+                      {isSelected ? (
+                        <rect
+                          x={elbowPt.x - 4.5}
+                          y={elbowPt.y - 4.5}
+                          width={9}
+                          height={9}
+                          rx={1.5}
+                          transform={`rotate(45 ${elbowPt.x} ${elbowPt.y})`}
+                          fill="#FFFFFF"
+                          stroke={accentColor}
+                          strokeWidth={2.2}
+                        />
+                      ) : (
+                        <circle
+                          cx={elbowPt.x}
+                          cy={elbowPt.y}
+                          r={3.2}
+                          fill="#FFFFFF"
+                          stroke={accentColor}
+                          strokeWidth={1.8}
+                        />
+                      )}
+                      <title>
+                        {language === 'zh'
+                          ? '拖拽移动引出线折角点（支持90°正交磁吸）；双击或右键删除该折角点'
+                          : 'Drag to move corner vertex (snaps 90°); double-click or right-click to remove corner'}
+                      </title>
+                    </g>
+                  ))}
+
+                  {/* Segment Midpoint "+" Handles to Insert New Corner Vertex (点击或拖拽线段中点新增折角点) */}
+                  {!ann.locked &&
+                    isSelected &&
+                    callout.segmentMidpoints.map((mid, midIdx) => (
+                      <g
+                        key={`callout-mid-${ann.id}-${midIdx}`}
+                        className="pointer-events-auto cursor-pointer opacity-75 hover:opacity-100"
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          const nextElbows = [...callout.elbowOffsets];
+                          const newOffset = {
+                            x: Math.round(mid.x - ann.x),
+                            y: Math.round(mid.y - ann.y),
+                          };
+                          nextElbows.splice(mid.insertIndex, 0, newOffset);
+                          onUpdateAnnotation?.(ann.id, {
+                            calloutElbows: nextElbows,
+                          });
+                          setSelectedAnnotationIds([ann.id]);
+                          setDraggingCalloutState({
+                            annotationId: ann.id,
+                            handleType: 'elbow',
+                            elbowIndex: mid.insertIndex,
+                          });
+                        }}
+                      >
+                        <circle cx={mid.x} cy={mid.y} r={9} fill="transparent" />
+                        <circle
+                          cx={mid.x}
+                          cy={mid.y}
+                          r={4.8}
+                          fill="#FFFFFF"
+                          stroke={accentColor}
+                          strokeWidth={1.5}
+                          strokeDasharray="2,1"
+                        />
+                        <line
+                          x1={mid.x - 2.4}
+                          y1={mid.y}
+                          x2={mid.x + 2.4}
+                          y2={mid.y}
+                          stroke={accentColor}
+                          strokeWidth={1.5}
+                        />
+                        <line
+                          x1={mid.x}
+                          y1={mid.y - 2.4}
+                          x2={mid.x}
+                          y2={mid.y + 2.4}
+                          stroke={accentColor}
+                          strokeWidth={1.5}
+                        />
+                        <title>
+                          {language === 'zh'
+                            ? '点击或拖拽在此处新增一个引出线折角点'
+                            : 'Click or drag to insert a new corner vertex here'}
+                        </title>
+                      </g>
+                    ))}
+
+                  {/* Draggable Target Pin Handle */}
+                  {!ann.locked && (
+                    <g
+                      className="pointer-events-auto cursor-grab active:cursor-grabbing"
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        setSelectedAnnotationIds([ann.id]);
+                        setDraggingCalloutState({
+                          annotationId: ann.id,
+                          handleType: 'end',
+                        });
+                      }}
+                    >
+                      <circle
+                        cx={callout.endPt.x}
+                        cy={callout.endPt.y}
+                        r={12}
+                        fill="transparent"
+                      />
+                      <circle
+                        cx={callout.endPt.x}
+                        cy={callout.endPt.y}
+                        r={isSelected || linkedPersonName ? 6.5 : 4.5}
+                        fill={linkedPersonName ? accentColor : '#FFFFFF'}
+                        stroke={accentColor}
+                        strokeWidth={2}
+                        opacity={isSelected ? 1 : 0.85}
+                      />
+                      {linkedPersonName && (
+                        <circle
+                          cx={callout.endPt.x}
+                          cy={callout.endPt.y}
+                          r={2.2}
+                          fill="#FFFFFF"
+                        />
+                      )}
+                      <title>
+                        {language === 'zh'
+                          ? `拖拽引出线终点指向任意位置或拾取人物卡片/分组框角点${
+                              linkedPersonName ? ` (已关联: ${linkedPersonName})` : ''
+                            }`
+                          : 'Drag callout arrow to point anywhere or snap to person card / frame corners'}
+                      </title>
+                    </g>
+                  )}
+                </g>
+              );
+            })}
+
+          {/* Active Freehand Pen or Highlighter Stroke Preview (with natural live arrowheads for Pen only) */}
+          {drawingStrokePoints && drawingStrokePoints.length > 1 && (
+            <g>
+              <path
+                d={generateSmoothSvgPath(drawingStrokePoints)}
+                fill="none"
+                stroke={penColor}
+                strokeWidth={
+                  toolMode === 'highlighter' ? Math.max(16, penStrokeWidth * 3.5) : penStrokeWidth
+                }
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={toolMode === 'highlighter' ? 0.38 : 0.95}
+              />
+              {toolMode === 'pen' &&
+                (penArrowMode === 'forward' || penArrowMode === 'both') &&
+                drawingStrokePoints.length >= 2 &&
+                (() => {
+                  const cleaned = cleanStrokeEndpoints(drawingStrokePoints);
+                  const endArrow = computeNaturalArrowhead(cleaned, penStrokeWidth, 'end');
+                  const startArrow =
+                    penArrowMode === 'both'
+                      ? computeNaturalArrowhead(cleaned, penStrokeWidth, 'start')
+                      : null;
+
+                  return (
+                    <>
+                      {endArrow && (
+                        <polygon
+                          points={endArrow.polygonPoints}
+                          fill={penColor}
+                          opacity={0.95}
+                        />
+                      )}
+                      {startArrow && (
+                        <polygon
+                          points={startArrow.polygonPoints}
+                          fill={penColor}
+                          opacity={0.95}
+                        />
+                      )}
+                    </>
+                  );
+                })()}
+            </g>
           )}
 
-          {/* Fading Presentation Laser Pointer Trails */}
+          {/* Fading Presentation Laser Pointer Trails (drawn strokes) */}
           {laserStrokes.map((ls) => {
             const age = Date.now() - ls.createdAt;
             const alpha = Math.max(0, 1 - age / 1400);
             const d = generateSmoothSvgPath(ls.points);
-            const tip = ls.points[ls.points.length - 1];
             return (
               <g key={ls.id} opacity={alpha}>
                 <path
                   d={d}
                   fill="none"
-                  stroke={ls.color}
-                  strokeWidth={9 / zoom}
+                  stroke="#EF4444"
+                  strokeWidth={14 / zoom}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  opacity={0.35}
+                  opacity={0.25}
                 />
                 <path
                   d={d}
                   fill="none"
-                  stroke="#ffffff"
-                  strokeWidth={3 / zoom}
+                  stroke="#F43F5E"
+                  strokeWidth={7 / zoom}
                   strokeLinecap="round"
                   strokeLinejoin="round"
+                  opacity={0.65}
                 />
-                {tip && (
-                  <circle
-                    cx={tip.x}
-                    cy={tip.y}
-                    r={6 / zoom}
-                    fill="#ffffff"
-                    stroke={ls.color}
-                    strokeWidth={3 / zoom}
-                  />
-                )}
+                <path
+                  d={d}
+                  fill="none"
+                  stroke="#FFFFFF"
+                  strokeWidth={2.5 / zoom}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={0.95}
+                />
               </g>
             );
           })}
 
-          {/* Active Laser Pointer Dragging */}
-          {activeLaserPoints && activeLaserPoints.length > 0 && (
+          {/* Active Laser Pointer Dragging Trail */}
+          {activeLaserPoints && activeLaserPoints.length > 1 && (
             <g>
-              {activeLaserPoints.length > 1 && (
-                <>
-                  <path
-                    d={generateSmoothSvgPath(activeLaserPoints)}
-                    fill="none"
-                    stroke={penColor}
-                    strokeWidth={10 / zoom}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    opacity={0.4}
-                  />
-                  <path
-                    d={generateSmoothSvgPath(activeLaserPoints)}
-                    fill="none"
-                    stroke="#ffffff"
-                    strokeWidth={3.5 / zoom}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </>
-              )}
-              {(() => {
-                const tip = activeLaserPoints[activeLaserPoints.length - 1];
-                return (
+              <path
+                d={generateSmoothSvgPath(activeLaserPoints)}
+                fill="none"
+                stroke="#EF4444"
+                strokeWidth={15 / zoom}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.28}
+              />
+              <path
+                d={generateSmoothSvgPath(activeLaserPoints)}
+                fill="none"
+                stroke="#EF4444"
+                strokeWidth={7.5 / zoom}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.75}
+              />
+              <path
+                d={generateSmoothSvgPath(activeLaserPoints)}
+                fill="none"
+                stroke="#FFFFFF"
+                strokeWidth={2.8 / zoom}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </g>
+          )}
+
+          {/* Live Laser Pointer Red Dot & Tapered Comet Tail on Hover/Move */}
+          {toolMode === 'laser' && (
+            <g>
+              {/* Tapered Comet Tail Segments */}
+              {laserHoverTrail.length > 1 &&
+                laserHoverTrail.map((pt, idx) => {
+                  if (idx === 0) return null;
+                  const prev = laserHoverTrail[idx - 1];
+                  const now = Date.now();
+                  const ageRatio = Math.max(0, 1 - (now - pt.t) / 360);
+                  const prog = (idx / laserHoverTrail.length) * ageRatio;
+                  if (prog <= 0.02) return null;
+                  return (
+                    <g key={`comet-${idx}`}>
+                      <line
+                        x1={prev.x}
+                        y1={prev.y}
+                        x2={pt.x}
+                        y2={pt.y}
+                        stroke="#EF4444"
+                        strokeWidth={(14 * prog) / zoom}
+                        strokeLinecap="round"
+                        opacity={0.32 * prog}
+                      />
+                      <line
+                        x1={prev.x}
+                        y1={prev.y}
+                        x2={pt.x}
+                        y2={pt.y}
+                        stroke="#FB7185"
+                        strokeWidth={(6.5 * prog) / zoom}
+                        strokeLinecap="round"
+                        opacity={0.78 * prog}
+                      />
+                      <line
+                        x1={prev.x}
+                        y1={prev.y}
+                        x2={pt.x}
+                        y2={pt.y}
+                        stroke="#FFFFFF"
+                        strokeWidth={(2.2 * prog) / zoom}
+                        strokeLinecap="round"
+                        opacity={0.9 * prog}
+                      />
+                    </g>
+                  );
+                })}
+
+              {/* Glowing Red Laser Pointer Dot */}
+              {laserCursorPos && (
+                <g>
                   <circle
-                    cx={tip.x}
-                    cy={tip.y}
-                    r={7 / zoom}
-                    fill="#ffffff"
-                    stroke={penColor}
-                    strokeWidth={3.5 / zoom}
+                    cx={laserCursorPos.x}
+                    cy={laserCursorPos.y}
+                    r={14 / zoom}
+                    fill="#EF4444"
+                    opacity={0.22}
                   />
-                );
-              })()}
+                  <circle
+                    cx={laserCursorPos.x}
+                    cy={laserCursorPos.y}
+                    r={8.5 / zoom}
+                    fill="#EF4444"
+                    opacity={0.48}
+                  />
+                  <circle
+                    cx={laserCursorPos.x}
+                    cy={laserCursorPos.y}
+                    r={5.2 / zoom}
+                    fill="#EF4444"
+                    stroke="#FFFFFF"
+                    strokeWidth={1.6 / zoom}
+                  />
+                  <circle
+                    cx={laserCursorPos.x}
+                    cy={laserCursorPos.y}
+                    r={1.8 / zoom}
+                    fill="#FFFFFF"
+                  />
+                </g>
+              )}
             </g>
           )}
 
@@ -3679,12 +4661,47 @@ export const Canvas: React.FC<CanvasProps> = ({
                 />
               );
             })()}
+
+          {/* Live Preview when dragging to draw a new Shape */}
+          {drawingNewShape &&
+            (() => {
+              const x = Math.min(drawingNewShape.startX, drawingNewShape.currentX);
+              const y = Math.min(drawingNewShape.startY, drawingNewShape.currentY);
+              const w = Math.max(24, Math.abs(drawingNewShape.currentX - drawingNewShape.startX));
+              const h = Math.max(24, Math.abs(drawingNewShape.currentY - drawingNewShape.startY));
+              const previewPaths = buildCommonShapeSvgPath(activeShapeType, w, h, penStrokeWidth);
+              return (
+                <g transform={`translate(${x}, ${y})`}>
+                  <path
+                    d={previewPaths.mainPath}
+                    fill={shapeBgColor ? shapeBgColor : `${penColor}18`}
+                    stroke={penColor}
+                    strokeWidth={penStrokeWidth}
+                    strokeLinejoin="round"
+                    strokeDasharray="6,3"
+                  />
+                  {previewPaths.detailPath && (
+                    <path
+                      d={previewPaths.detailPath}
+                      fill="none"
+                      stroke={penColor}
+                      strokeWidth={penStrokeWidth}
+                      strokeLinejoin="round"
+                      strokeDasharray="6,3"
+                    />
+                  )}
+                </g>
+              );
+            })()}
+
+          {/* Active Real-Time Magnetic Smart Alignment Guides (Smart Guides) */}
+          <SmartGuidesLayer guides={activeSnapGuides} zoom={zoom} />
         </svg>
       </div>
 
       {/* Layer Manager Panel */}
       <LayerManagerPanel
-        isOpen={isLayerPanelOpen}
+        isOpen={isLayerPanelOpen && !isPresentationMode}
         onClose={onToggleLayerPanel}
         people={people}
         relationships={relationships}
@@ -3701,839 +4718,76 @@ export const Canvas: React.FC<CanvasProps> = ({
       />
 
       {/* Comprehensive Custom Right-Click Context Menu */}
-      {contextMenu && (
-        <div
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          onMouseDown={(e) => e.stopPropagation()}
-          onContextMenu={(e) => e.preventDefault()}
-          className="absolute z-50 w-60 bg-white/98 backdrop-blur-md border border-slate-200 rounded-xl shadow-2xl py-1.5 text-xs text-slate-700 select-none"
-        >
-          {/* Target: Person Card */}
-          {contextMenu.targetType === 'person' &&
-            contextMenu.targetId &&
-            (() => {
-              const targetPerson = people.find((p) => p.id === contextMenu.targetId);
-              if (!targetPerson) return null;
-              const targetIds = selectedPersonIds.includes(targetPerson.id)
-                ? selectedPersonIds
-                : [targetPerson.id];
+      <CanvasContextMenu
+        contextMenu={contextMenu}
+        onCloseContextMenu={() => setContextMenu(null)}
+        people={people}
+        canvasPeople={canvasPeople}
+        relationships={relationships}
+        groupFrames={groupFrames}
+        visibleFrames={visibleFrames}
+        annotations={annotations}
+        visibleAnnotations={visibleAnnotations}
+        selectedPersonIds={selectedPersonIds}
+        focusedPersonId={focusedPersonId}
+        copiedPersonIds={copiedPersonIds}
+        stickyColor={stickyColor}
+        stickyBgColor={stickyBgColor}
+        stickyStamp={stickyStamp}
+        stickyStampLabel={stickyStampLabel}
+        stickyCalloutMode={stickyCalloutMode}
+        onEditPerson={onEditPerson}
+        onOpenTimeline={onOpenTimeline}
+        onSetFocusedPersonId={onSetFocusedPersonId}
+        onStartConnectFromNode={(personId) => {
+          setToolMode('connect');
+          setConnectModeSourceId(personId);
+        }}
+        onBatchMoveLayer={onBatchMoveLayer}
+        onBatchUpdatePeople={onBatchUpdatePeople}
+        onGroupPeopleIntoFrame={onGroupPeopleIntoFrame}
+        onDuplicatePeople={onDuplicatePeople}
+        onToggleLockItem={onToggleLockItem}
+        onBatchRemoveFromCanvas={onBatchRemoveFromCanvas}
+        onBatchDeletePeople={onBatchDeletePeople}
+        onClearSelectedPeople={() => setSelectedPersonIds([])}
+        onEditFrame={onEditFrame}
+        onSelectCardsInFrame={handleSelectCardsInFrame}
+        onMoveLayer={onMoveLayer}
+        onDeleteFrame={onDeleteFrame}
+        onEditRelationship={onEditRelationship}
+        onUpdateRelationship={onUpdateRelationship}
+        onUpdateRelationshipOffset={onUpdateRelationshipOffset}
+        onDeleteRelationship={onDeleteRelationship}
+        onUpdateAnnotation={onUpdateAnnotation}
+        onDeleteAnnotations={onDeleteAnnotations}
+        onClearSelectedAnnotations={() => setSelectedAnnotationIds([])}
+        onCreatePersonAt={onCreatePersonAt}
+        onCreateFrameAt={onCreateFrameAt}
+        onCreateAnnotation={onCreateAnnotation}
+        onSelectAndEditAnnotation={(id) => {
+          setSelectedAnnotationIds([id]);
+          setEditingStickyId(id);
+        }}
+        onOpenOcrAt={onOpenOcrAt}
+        onSelectAllOnCanvas={() => {
+          setSelectedPersonIds(canvasPeople.map((p) => p.id));
+          setSelectedFrameIds(visibleFrames.map((f) => f.id));
+          setSelectedAnnotationIds(
+            visibleAnnotations.filter((a) => !a.locked).map((a) => a.id)
+          );
+        }}
+        onToggleLayerPanel={onToggleLayerPanel}
+        onAutoLayoutFaction={onAutoLayoutFaction}
+        onAutoLayoutHierarchy={onAutoLayoutHierarchy}
+        onFitView={handleFitView}
+        onOpenStyleCenter={onOpenStyleCenter}
+      />
 
-              return (
-                <>
-                  <div className="px-3 py-1.5 border-b border-slate-100 flex items-center justify-between">
-                    <span className="font-bold text-slate-900 truncate">
-                      {targetIds.length > 1
-                        ? (language === 'zh' ? `已选 ${targetIds.length} 位干系人` : `${targetIds.length} selected`)
-                        : targetPerson.name}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      Z:{targetPerson.zIndex ?? 100}
-                    </span>
-                  </div>
-
-                  {targetIds.length === 1 && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setContextMenu(null);
-                          onEditPerson(targetPerson);
-                        }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                      >
-                        <Edit2 className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                        <span>{t('ctxEditPerson')}</span>
-                      </button>
-
-                      {onOpenTimeline && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setContextMenu(null);
-                            onOpenTimeline(targetPerson);
-                          }}
-                          className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                        >
-                          <Clock className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                          <span>{t('ctxTimeline')}</span>
-                        </button>
-                      )}
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setContextMenu(null);
-                          onSetFocusedPersonId?.(
-                            focusedPersonId === targetPerson.id ? null : targetPerson.id
-                          );
-                        }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                      >
-                        <GitFork className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                        <span>
-                          {focusedPersonId === targetPerson.id ? t('ctxUnfocusNetwork') : t('ctxFocusNetwork')}
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setContextMenu(null);
-                          setToolMode('connect');
-                          setConnectModeSourceId(targetPerson.id);
-                        }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                      >
-                        <Link2 className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                        <span>{t('ctxConnectFromNode')}</span>
-                      </button>
-
-                      {onOpenInfluencePathWithPerson && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setContextMenu(null);
-                            onOpenInfluencePathWithPerson(targetPerson.id, true);
-                          }}
-                          className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                        >
-                          <Compass className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                          <span>{t('ctxSetAsTarget')}</span>
-                        </button>
-                      )}
-                    </>
-                  )}
-
-                  {/* Layer Order */}
-                  <div className="my-1 border-t border-slate-100 pt-1 px-3">
-                    <div className="text-[10px] text-slate-400 mb-1">{t('layerOrdering')}</div>
-                    <div className="grid grid-cols-4 gap-1">
-                      {[
-                        { action: 'front' as LayerAction, label: language === 'zh' ? '顶层' : 'Front', icon: ArrowUpToLine },
-                        { action: 'forward' as LayerAction, label: language === 'zh' ? '上移' : 'Up', icon: ArrowUp },
-                        { action: 'backward' as LayerAction, label: language === 'zh' ? '下移' : 'Down', icon: ArrowDown },
-                        { action: 'back' as LayerAction, label: language === 'zh' ? '底层' : 'Back', icon: ArrowDownToLine },
-                      ].map((btn) => {
-                        const Icon = btn.icon;
-                        return (
-                          <button
-                            key={btn.action}
-                            type="button"
-                            onClick={() => {
-                              onBatchMoveLayer(targetIds, [], btn.action);
-                              setContextMenu(null);
-                            }}
-                            className="py-1 rounded border border-slate-200 hover:bg-slate-100 flex flex-col items-center gap-0.5 text-[10px] cursor-pointer"
-                          >
-                            <Icon className="w-3 h-3 text-slate-600" strokeWidth={1.5} />
-                            <span>{btn.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Stage Switcher */}
-                  <div className="my-1 border-t border-slate-100 pt-1 px-3">
-                    <div className="text-[10px] text-slate-400 mb-1">{t('batchSetStage')}</div>
-                    <div className="grid grid-cols-5 gap-1">
-                      {STAGE_LIST.map((st) => (
-                        <button
-                          key={st.key}
-                          type="button"
-                          onClick={() => {
-                            onBatchUpdatePeople(targetIds, {
-                              relationshipStage: st.key as RelationshipStage,
-                            });
-                            setContextMenu(null);
-                          }}
-                          className="py-1 rounded border border-slate-200 hover:bg-slate-100 flex flex-col items-center text-[10px] cursor-pointer"
-                          title={st.label}
-                        >
-                          <span>{st.emoji}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Card Color */}
-                  <div className="my-1 border-t border-slate-100 pt-1 px-3">
-                    <div className="text-[10px] text-slate-400 mb-1">{t('batchCardColor')}</div>
-                    <div className="flex items-center justify-between">
-                      {CARD_COLORS.slice(0, 7).map((c) => (
-                        <button
-                          key={c.value}
-                          type="button"
-                          onClick={() => {
-                            onBatchUpdatePeople(targetIds, { cardColor: c.value });
-                            setContextMenu(null);
-                          }}
-                          className="w-4 h-4 rounded-full border border-slate-200 hover:scale-120 transition-transform cursor-pointer"
-                          style={{ backgroundColor: c.value }}
-                          title={c.name}
-                        />
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="my-1 border-t border-slate-100" />
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onGroupPeopleIntoFrame(targetIds);
-                    }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Frame className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                    <span>{t('ctxGroupIntoFrame')}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onDuplicatePeople(targetIds, 36, 36);
-                    }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Copy className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                    <span>{t('ctxDuplicateCard')}</span>
-                  </button>
-
-                  {targetIds.length === 1 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setContextMenu(null);
-                        onToggleLockItem('person', targetPerson.id);
-                      }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                    >
-                      {targetPerson.locked ? (
-                        <>
-                          <Unlock className="w-3.5 h-3.5 text-amber-600" strokeWidth={1.5} />
-                          <span>{t('ctxUnlockPosition')}</span>
-                        </>
-                      ) : (
-                        <>
-                          <Lock className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                          <span>{t('ctxLockPosition')}</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  <div className="my-1 border-t border-slate-100" />
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onBatchRemoveFromCanvas(targetIds);
-                      setSelectedPersonIds([]);
-                    }}
-                    className="w-full px-3 py-1.5 text-left text-amber-600 hover:bg-amber-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                    <span>{t('ctxRemoveFromCanvas')}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onBatchDeletePeople(targetIds);
-                      setSelectedPersonIds([]);
-                    }}
-                    className="w-full px-3 py-1.5 text-left text-rose-600 hover:bg-rose-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                    <span>{t('ctxDeletePersonPermanent')}</span>
-                  </button>
-                </>
-              );
-            })()}
-
-          {/* Target: GroupFrame */}
-          {contextMenu.targetType === 'frame' &&
-            contextMenu.targetId &&
-            (() => {
-              const frame = groupFrames.find((f) => f.id === contextMenu.targetId);
-              if (!frame) return null;
-              return (
-                <>
-                  <div className="px-3 py-1.5 border-b border-slate-100 flex items-center justify-between">
-                    <span className="font-bold text-slate-900 truncate">{frame.title}</span>
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      Z:{frame.zIndex ?? 10}
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onEditFrame(frame);
-                    }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Edit2 className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                    <span>{t('ctxEditFrame')}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      handleSelectCardsInFrame(frame);
-                    }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <BoxSelect className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                    <span>{t('ctxSelectCardsInFrame')}</span>
-                  </button>
-
-                  <div className="my-1 border-t border-slate-100 pt-1 px-3">
-                    <div className="text-[10px] text-slate-400 mb-1">{t('layerOrdering')}</div>
-                    <div className="grid grid-cols-4 gap-1">
-                      {[
-                        { action: 'front' as LayerAction, label: language === 'zh' ? '顶层' : 'Front', icon: ArrowUpToLine },
-                        { action: 'forward' as LayerAction, label: language === 'zh' ? '上移' : 'Up', icon: ArrowUp },
-                        { action: 'backward' as LayerAction, label: language === 'zh' ? '下移' : 'Down', icon: ArrowDown },
-                        { action: 'back' as LayerAction, label: language === 'zh' ? '底层' : 'Back', icon: ArrowDownToLine },
-                      ].map((btn) => {
-                        const Icon = btn.icon;
-                        return (
-                          <button
-                            key={btn.action}
-                            type="button"
-                            onClick={() => {
-                              onMoveLayer('frame', frame.id, btn.action);
-                              setContextMenu(null);
-                            }}
-                            className="py-1 rounded border border-slate-200 hover:bg-slate-100 flex flex-col items-center gap-0.5 text-[10px] cursor-pointer"
-                          >
-                            <Icon className="w-3 h-3 text-slate-600" strokeWidth={1.5} />
-                            <span>{btn.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onToggleLockItem('frame', frame.id);
-                    }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    {frame.locked ? (
-                      <>
-                        <Unlock className="w-3.5 h-3.5 text-amber-600" strokeWidth={1.5} />
-                        <span>{t('ctxUnlockFrame')}</span>
-                      </>
-                    ) : (
-                      <>
-                        <Lock className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                        <span>{t('ctxLockFrame')}</span>
-                      </>
-                    )}
-                  </button>
-
-                  <div className="my-1 border-t border-slate-100" />
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onDeleteFrame(frame.id);
-                    }}
-                    className="w-full px-3 py-1.5 text-left text-rose-600 hover:bg-rose-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                    <span>{t('ctxDeleteFrame')}</span>
-                  </button>
-                </>
-              );
-            })()}
-
-          {/* Target: Relationship Line */}
-          {contextMenu.targetType === 'relationship' &&
-            contextMenu.targetId &&
-            (() => {
-              const rel = relationships.find((r) => r.id === contextMenu.targetId);
-              if (!rel) return null;
-              return (
-                <>
-                  <div className="px-3 py-1.5 border-b border-slate-100 flex items-center justify-between">
-                    <span className="font-bold text-slate-900 truncate">
-                      {rel.label}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      Z:{rel.zIndex ?? 60}
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onEditRelationship(rel);
-                    }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Edit2 className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                    <span>{t('ctxEditRelation')}</span>
-                  </button>
-
-                  <div className="my-1 border-t border-slate-100 pt-1 px-3">
-                    <div className="text-[10px] text-slate-400 mb-1">{t('ctxQuickLineGeometry')}</div>
-                    <div className="grid grid-cols-4 gap-1">
-                      {[
-                        { key: 'bezier', label: t('geomBezier') },
-                        { key: 'straight', label: t('geomStraight') },
-                        { key: 'step', label: t('geomStep') },
-                        { key: 'arc', label: t('geomArc') },
-                      ].map((g) => (
-                        <button
-                          key={g.key}
-                          type="button"
-                          onClick={() => {
-                            onUpdateRelationship(rel.id, { lineStyle: g.key as any });
-                            setContextMenu(null);
-                          }}
-                          className={`py-1 rounded border text-[10px] cursor-pointer ${
-                            rel.lineStyle === g.key
-                              ? 'border-blue-600 bg-blue-50 text-blue-700 font-semibold'
-                              : 'border-slate-200 hover:bg-slate-50'
-                          }`}
-                        >
-                          {g.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="my-1 border-t border-slate-100 pt-1 px-3">
-                    <div className="text-[10px] text-slate-400 mb-1">{t('layerOrdering')}</div>
-                    <div className="grid grid-cols-4 gap-1">
-                      {[
-                        { action: 'front' as LayerAction, label: language === 'zh' ? '顶层' : 'Front', icon: ArrowUpToLine },
-                        { action: 'forward' as LayerAction, label: language === 'zh' ? '上移' : 'Up', icon: ArrowUp },
-                        { action: 'backward' as LayerAction, label: language === 'zh' ? '下移' : 'Down', icon: ArrowDown },
-                        { action: 'back' as LayerAction, label: language === 'zh' ? '底层' : 'Back', icon: ArrowDownToLine },
-                      ].map((btn) => {
-                        const Icon = btn.icon;
-                        return (
-                          <button
-                            key={btn.action}
-                            type="button"
-                            onClick={() => {
-                              onMoveLayer('relationship', rel.id, btn.action);
-                              setContextMenu(null);
-                            }}
-                            className="py-1 rounded border border-slate-200 hover:bg-slate-100 flex flex-col items-center gap-0.5 text-[10px] cursor-pointer"
-                          >
-                            <Icon className="w-3 h-3 text-slate-600" strokeWidth={1.5} />
-                            <span>{btn.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onUpdateRelationshipOffset(rel.id, 0, 0);
-                    }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5 text-slate-500" strokeWidth={1.5} />
-                    <span>{t('ctxResetLabelOffset')}</span>
-                  </button>
-
-                  <div className="my-1 border-t border-slate-100" />
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onDeleteRelationship(rel.id);
-                    }}
-                    className="w-full px-3 py-1.5 text-left text-rose-600 hover:bg-rose-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                    <span>{t('ctxDeleteRelation')}</span>
-                  </button>
-                </>
-              );
-            })()}
-
-          {/* Target: Freehand Annotation / Sticky Note */}
-          {contextMenu.targetType === 'annotation' &&
-            contextMenu.targetId &&
-            (() => {
-              const ann = annotations.find((a) => a.id === contextMenu.targetId);
-              if (!ann) return null;
-              return (
-                <>
-                  <div className="px-3 py-1.5 border-b border-slate-100 flex items-center justify-between">
-                    <span className="font-bold text-slate-900 truncate">
-                      {ann.kind === 'sticky'
-                        ? language === 'zh'
-                          ? '作战便签贴纸'
-                          : 'Tactical Sticky'
-                        : ann.kind === 'shape'
-                        ? language === 'zh'
-                          ? '一笔成型几何图形'
-                          : 'Smart Shape'
-                        : ann.kind === 'highlighter'
-                        ? language === 'zh'
-                          ? '荧光马克笔标注'
-                          : 'Highlighter'
-                        : language === 'zh'
-                        ? '自由手绘批注'
-                        : 'Freehand Stroke'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      Z:{ann.zIndex ?? 145}
-                    </span>
-                  </div>
-
-                  {ann.kind === 'sticky' && (
-                    <div className="my-1 border-b border-slate-100 pb-1.5 px-3">
-                      <div className="text-[10px] text-slate-400 mb-1">
-                        {language === 'zh' ? '切换战术印章标签' : 'Switch Tactical Stamp'}
-                      </div>
-                      <div className="grid grid-cols-3 gap-1">
-                        {TACTICAL_STAMPS.map((st) => (
-                          <button
-                            key={st.key}
-                            type="button"
-                            onClick={() => {
-                              onUpdateAnnotation?.(ann.id, {
-                                stamp: st.key,
-                                color: st.color,
-                              });
-                              setContextMenu(null);
-                            }}
-                            className={`py-1 rounded border text-[10px] cursor-pointer ${
-                              ann.stamp === st.key
-                                ? 'border-blue-600 bg-blue-50 text-blue-700 font-semibold'
-                                : 'border-slate-200 hover:bg-slate-50'
-                            }`}
-                          >
-                            {language === 'zh' ? st.labelZh : st.labelEn}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="my-1 px-3">
-                    <div className="text-[10px] text-slate-400 mb-1">
-                      {language === 'zh' ? '批注颜色' : 'Annotation Color'}
-                    </div>
-                    <div className="flex items-center justify-between">
-                      {PEN_TACTICAL_COLORS.map((c) => (
-                        <button
-                          key={c.value}
-                          type="button"
-                          onClick={() => {
-                            onUpdateAnnotation?.(ann.id, { color: c.value });
-                            setContextMenu(null);
-                          }}
-                          className="w-4.5 h-4.5 rounded-full border border-slate-200 hover:scale-120 transition-transform cursor-pointer"
-                          style={{ backgroundColor: c.value }}
-                          title={c.name}
-                        />
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="my-1 border-t border-slate-100 pt-1 px-3">
-                    <div className="text-[10px] text-slate-400 mb-1">{t('layerOrdering')}</div>
-                    <div className="grid grid-cols-4 gap-1">
-                      {[
-                        { action: 'front' as LayerAction, label: language === 'zh' ? '顶层' : 'Front', icon: ArrowUpToLine },
-                        { action: 'forward' as LayerAction, label: language === 'zh' ? '上移' : 'Up', icon: ArrowUp },
-                        { action: 'backward' as LayerAction, label: language === 'zh' ? '下移' : 'Down', icon: ArrowDown },
-                        { action: 'back' as LayerAction, label: language === 'zh' ? '底层' : 'Back', icon: ArrowDownToLine },
-                      ].map((btn) => {
-                        const Icon = btn.icon;
-                        return (
-                          <button
-                            key={btn.action}
-                            type="button"
-                            onClick={() => {
-                              onMoveLayer('annotation', ann.id, btn.action);
-                              setContextMenu(null);
-                            }}
-                            className="py-1 rounded border border-slate-200 hover:bg-slate-100 flex flex-col items-center gap-0.5 text-[10px] cursor-pointer"
-                          >
-                            <Icon className="w-3 h-3 text-slate-600" strokeWidth={1.5} />
-                            <span>{btn.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onToggleLockItem('annotation', ann.id);
-                    }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    {ann.locked ? (
-                      <>
-                        <Unlock className="w-3.5 h-3.5 text-amber-600" strokeWidth={1.5} />
-                        <span>{t('ctxUnlockPosition')}</span>
-                      </>
-                    ) : (
-                      <>
-                        <Lock className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                        <span>{t('ctxLockPosition')}</span>
-                      </>
-                    )}
-                  </button>
-
-                  <div className="my-1 border-t border-slate-100" />
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setContextMenu(null);
-                      onDeleteAnnotations?.([ann.id]);
-                      setSelectedAnnotationIds([]);
-                    }}
-                    className="w-full px-3 py-1.5 text-left text-rose-600 hover:bg-rose-50 flex items-center gap-2 cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                    <span>{t('deleteBtn')}</span>
-                  </button>
-                </>
-              );
-            })()}
-
-          {/* Target: Canvas Background */}
-          {contextMenu.targetType === 'canvas' && (
-            <>
-              <div className="px-3 py-1 border-b border-slate-100 text-[10px] font-semibold text-slate-400">
-                {t('ctxCanvasMenu')} ({contextMenu.canvasX}, {contextMenu.canvasY})
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const { canvasX, canvasY } = contextMenu;
-                  setContextMenu(null);
-                  onCreatePersonAt(canvasX - CARD_WIDTH / 2, canvasY - CARD_HEIGHT / 2);
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 font-medium text-slate-800 cursor-pointer"
-              >
-                <UserPlus className="w-3.5 h-3.5 text-blue-600" strokeWidth={1.5} />
-                <span>{t('ctxCreatePersonHere')}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const { canvasX, canvasY } = contextMenu;
-                  setContextMenu(null);
-                  onCreateFrameAt({
-                    title: language === 'zh' ? '新阵营分组区域' : 'New Group Frame',
-                    subtitle: language === 'zh' ? '核心决策与协同组' : 'Core Decision Team',
-                    x: canvasX - 180,
-                    y: canvasY - 160,
-                    width: 360,
-                    height: 360,
-                    color: '#8B5CF6',
-                    zIndex: 15,
-                  });
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-              >
-                <Frame className="w-3.5 h-3.5 text-purple-600" strokeWidth={1.5} />
-                <span>{t('ctxCreateFrameHere')}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const { canvasX, canvasY } = contextMenu;
-                  setContextMenu(null);
-                  const created = onCreateAnnotation?.({
-                    kind: 'sticky',
-                    x: canvasX - 105,
-                    y: canvasY - 68,
-                    width: 210,
-                    height: 136,
-                    color: stickyColor,
-                    strokeWidth: 2,
-                    opacity: 1,
-                    stamp: stickyStamp,
-                    text:
-                      language === 'zh'
-                        ? '请填写关键推进动作或防冲标卡点…'
-                        : 'Enter tactical note or action item...',
-                    zIndex: 155,
-                  });
-                  if (created && created.id) {
-                    setSelectedAnnotationIds([created.id]);
-                    setEditingStickyId(created.id);
-                  }
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-              >
-                <StickyNote className="w-3.5 h-3.5 text-amber-600" strokeWidth={1.5} />
-                <span>{t('ctxCreateStickyHere')}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const { canvasX, canvasY } = contextMenu;
-                  setContextMenu(null);
-                  onOpenOcrAt(canvasX - CARD_WIDTH / 2, canvasY - CARD_HEIGHT / 2);
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-indigo-600" strokeWidth={1.5} />
-                <span>{t('ctxOcrHere')}</span>
-              </button>
-
-              {copiedPersonIds.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setContextMenu(null);
-                    onDuplicatePeople(copiedPersonIds, 40, 40);
-                  }}
-                  className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                >
-                  <Copy className="w-3.5 h-3.5 text-emerald-600" strokeWidth={1.5} />
-                  <span>{t('ctxPasteCards', { count: copiedPersonIds.length })}</span>
-                </button>
-              )}
-
-              <div className="my-1 border-t border-slate-100" />
-
-              <button
-                type="button"
-                onClick={() => {
-                  setContextMenu(null);
-                  setSelectedPersonIds(canvasPeople.map((p) => p.id));
-                  setSelectedFrameIds(visibleFrames.map((f) => f.id));
-                  setSelectedAnnotationIds(
-                    visibleAnnotations.filter((a) => !a.locked).map((a) => a.id)
-                  );
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-              >
-                <Check className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                <span>{t('ctxSelectAll')}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setContextMenu(null);
-                  onToggleLayerPanel();
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-              >
-                <Layers className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                <span>{t('ctxToggleLayerManager')}</span>
-              </button>
-
-              <div className="my-1 border-t border-slate-100" />
-
-              <button
-                type="button"
-                onClick={() => {
-                  setContextMenu(null);
-                  onAutoLayoutFaction?.();
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-              >
-                <LayoutGrid className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                <span>{t('ctxAutoLayoutFaction')}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setContextMenu(null);
-                  onAutoLayoutHierarchy?.();
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-              >
-                <GitFork className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                <span>{t('ctxAutoLayoutHierarchy')}</span>
-              </button>
-
-              <div className="my-1 border-t border-slate-100" />
-
-              <button
-                type="button"
-                onClick={() => {
-                  setContextMenu(null);
-                  handleFitView();
-                }}
-                className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-              >
-                <Maximize2 className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                <span>{t('ctxFitView')}</span>
-              </button>
-
-              {onOpenStyleCenter && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setContextMenu(null);
-                    onOpenStyleCenter();
-                  }}
-                  className="w-full px-3 py-1.5 text-left hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
-                >
-                  <Palette className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                  <span>{t('ctxSwitchTheme')}</span>
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Floating Style Studio Trigger */}
-      {onOpenStyleCenter && (
-        <button
-          type="button"
-          onClick={onOpenStyleCenter}
-          className="hidden md:flex absolute bottom-5 left-5 z-20 items-center gap-2 px-3 py-2 bg-white/95 backdrop-blur-xs border border-slate-200/90 rounded-xl shadow-lg hover:shadow-xl hover:border-slate-300 text-slate-700 transition-all text-xs font-semibold group cursor-pointer"
-          title={t('styleCenterTip')}
-        >
-          <div className="w-5 h-5 rounded-md bg-slate-800 text-white flex items-center justify-center transition-transform shadow-2xs">
-            <Palette className="w-3.5 h-3.5" strokeWidth={1.5} />
-          </div>
-          <span className="text-slate-800 font-bold">{t('hudStyleStudio')}</span>
-          <span className="text-[10px] text-slate-500 font-mono">
-            20×20×20
-          </span>
-        </button>
-      )}
-
-      {/* Floating Canvas Navigation HUD (Bottom Right) */}
+      {/* Floating Iconized Canvas Navigation HUD (Bottom Right - Hidden in Presentation Mode) */}
+      {!isPresentationMode && (
       <div
-        className="absolute bottom-5 right-5 z-20 flex items-center bg-white/95 backdrop-blur-xs border border-slate-200/90 rounded-xl shadow-lg p-1 gap-1 text-slate-700"
+        className="absolute bottom-5 right-5 z-20 flex items-center bg-white/95 backdrop-blur-xs border border-slate-200/90 rounded-xl shadow-lg p-1 gap-0.5 text-slate-700"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <button
@@ -4546,7 +4800,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         </button>
         <button
           onClick={() => zoomToLevel(1)}
-          className="px-2 py-1 hover:bg-slate-100 rounded-lg text-xs font-mono tabular-nums text-slate-700 font-semibold cursor-pointer"
+          className="px-1.5 py-1 hover:bg-slate-100 rounded-lg text-xs font-mono tabular-nums text-slate-700 font-semibold cursor-pointer"
           title={`${t('hudReset100')} (Ctrl + 滚轮缩放)`}
         >
           {Math.round(zoom * 100)}%
@@ -4564,24 +4818,24 @@ export const Canvas: React.FC<CanvasProps> = ({
 
         <button
           onClick={handleFitView}
-          className="flex items-center gap-1 px-2.5 py-1.5 hover:bg-slate-100 rounded-lg text-xs font-medium text-slate-700 transition-colors cursor-pointer"
+          className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
           title={t('hudFitScreen')}
+          aria-label={t('hudFitScreen')}
         >
-          <Maximize2 className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-          <span>{t('hudFitScreen')}</span>
+          <Maximize2 className="w-4 h-4" strokeWidth={1.5} />
         </button>
 
         <button
           onClick={() => setShowMiniMap(!showMiniMap)}
           className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
             showMiniMap
-              ? 'bg-blue-50 text-blue-600 font-semibold'
-              : 'hover:bg-slate-100 text-slate-600'
+              ? 'bg-blue-50 text-blue-600'
+              : 'hover:bg-slate-100 text-slate-600 hover:text-slate-900'
           }`}
           title={t('hudMinimap')}
           aria-label={t('hudMinimap')}
         >
-          <MapIcon className="w-3.5 h-3.5" strokeWidth={1.5} />
+          <MapIcon className="w-4 h-4" strokeWidth={1.5} />
         </button>
 
         <button
@@ -4593,30 +4847,30 @@ export const Canvas: React.FC<CanvasProps> = ({
               setLocalShowHeatmap((prev) => !prev);
             }
           }}
-          className={`px-2 py-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-semibold cursor-pointer ${
+          className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
             showStrengthHeatmap
-              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-              : 'hover:bg-slate-100 text-slate-600'
+              ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+              : 'hover:bg-slate-100 text-slate-600 hover:text-slate-900'
           }`}
           title={showStrengthHeatmap ? t('hudHeatmapOn') : t('hudHeatmapOff')}
+          aria-label={t('hudHeatmap')}
         >
-          <Activity className="w-3.5 h-3.5 text-emerald-600" strokeWidth={1.5} />
-          <span className="hidden sm:inline">{t('hudHeatmap')}</span>
+          <Activity className="w-4 h-4" strokeWidth={1.5} />
         </button>
 
         {onToggleGroupFrames && (
           <button
             type="button"
             onClick={onToggleGroupFrames}
-            className={`px-2 py-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-semibold cursor-pointer ${
+            className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
               showGroupFrames
-                ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                : 'hover:bg-slate-100 text-slate-600'
+                ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'
+                : 'hover:bg-slate-100 text-slate-600 hover:text-slate-900'
             }`}
             title={showGroupFrames ? t('hudFramesHide') : t('hudFramesShow')}
+            aria-label={t('hudFrames')}
           >
-            <Frame className="w-3.5 h-3.5 text-blue-600" strokeWidth={1.5} />
-            <span className="hidden sm:inline">{t('hudFrames')}</span>
+            <Frame className="w-4 h-4" strokeWidth={1.5} />
           </button>
         )}
 
@@ -4624,15 +4878,15 @@ export const Canvas: React.FC<CanvasProps> = ({
           <button
             type="button"
             onClick={onToggleAnnotations}
-            className={`px-2 py-1.5 rounded-lg transition-colors flex items-center gap-1 text-xs font-semibold cursor-pointer ${
+            className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
               showAnnotations
-                ? 'bg-rose-50 text-rose-700 border border-rose-200'
-                : 'hover:bg-slate-100 text-slate-600'
+                ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200'
+                : 'hover:bg-slate-100 text-slate-600 hover:text-slate-900'
             }`}
             title={showAnnotations ? t('hudAnnotationsHide') : t('hudAnnotationsShow')}
+            aria-label={t('hudAnnotations')}
           >
-            <PenTool className="w-3.5 h-3.5 text-rose-600" strokeWidth={1.5} />
-            <span className="hidden sm:inline">{t('hudAnnotations')}</span>
+            <PenTool className="w-4 h-4" strokeWidth={1.5} />
           </button>
         )}
 
@@ -4641,16 +4895,18 @@ export const Canvas: React.FC<CanvasProps> = ({
             setPan({ x: 220, y: 110 });
             setZoom(0.85);
           }}
-          className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors text-slate-600 cursor-pointer"
+          className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors text-slate-600 hover:text-slate-900 cursor-pointer"
           title={t('hudResetView')}
           aria-label={t('hudResetView')}
         >
-          <RotateCcw className="w-3.5 h-3.5" strokeWidth={1.5} />
+          <RotateCcw className="w-4 h-4" strokeWidth={1.5} />
         </button>
       </div>
+      )}
 
-      {/* Floating MiniMap Overlay */}
-      {showMiniMap &&
+      {/* Floating MiniMap Overlay (Hidden in Presentation Mode) */}
+      {!isPresentationMode &&
+        showMiniMap &&
         canvasPeople.length > 0 &&
         (() => {
           const miniW = 180;
@@ -4750,6 +5006,57 @@ export const Canvas: React.FC<CanvasProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Module 2.3: Executive Presentation HUD */}
+      {isPresentationMode && onExitPresentationMode && (
+        <PresentationHud
+          groupFrames={visibleFrames}
+          cameraBookmarks={cameraBookmarks}
+          activeStopId={activePresentationStopId}
+          toolMode={toolMode}
+          hasFocusedPerson={Boolean(focusedPersonId)}
+          focusedPersonName={focusedPersonId ? peopleMap.get(focusedPersonId)?.name : null}
+          onSelectStop={(stop) => {
+            setActivePresentationStopId(stop.id);
+            const containerW = containerRef.current?.clientWidth || 1200;
+            const containerH = containerRef.current?.clientHeight || 800;
+            if (stop.kind === 'bookmark' && stop.panX !== undefined && stop.panY !== undefined && stop.zoom !== undefined) {
+              setZoom(stop.zoom);
+              setPan({ x: stop.panX, y: stop.panY });
+            } else if (stop.width && stop.height && stop.x !== undefined && stop.y !== undefined) {
+              const pad = 120;
+              const targetZoom = Math.min(
+                1.25,
+                Math.max(
+                  0.45,
+                  Math.min(
+                    (containerW - pad * 2) / stop.width,
+                    (containerH - pad * 2) / stop.height
+                  )
+                )
+              );
+              const centerX = stop.x + stop.width / 2;
+              const centerY = stop.y + stop.height / 2;
+              setZoom(targetZoom);
+              setPan({
+                x: Math.round(containerW / 2 - centerX * targetZoom),
+                y: Math.round(containerH / 2 - centerY * targetZoom),
+              });
+            }
+          }}
+          onFitAll={() => {
+            setActivePresentationStopId(null);
+            handleFitView();
+          }}
+          onToggleLaser={() => setToolMode(toolMode === 'laser' ? 'select' : 'laser')}
+          onClearSpotlight={() => onSetFocusedPersonId?.(null)}
+          onSaveCurrentBookmark={(title) => {
+            onAddCameraBookmark?.(title, pan.x, pan.y, zoom);
+          }}
+          onDeleteBookmark={(id) => onDeleteCameraBookmark?.(id)}
+          onExitPresentation={onExitPresentationMode}
+        />
       )}
     </div>
   );

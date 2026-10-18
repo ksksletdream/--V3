@@ -5,7 +5,15 @@ import {
   VisitRecord,
   ProjectMap,
   CanvasAnnotation,
+  ProjectSnapshot,
+  CameraBookmark,
 } from '../types/crm.ts';
+import type {
+  BackgroundStyleConfig,
+  LineStyleConfig,
+  CardStyleConfig,
+  SavedCustomStyleScheme,
+} from '../types/styles.ts';
 import {
   INITIAL_PEOPLE,
   INITIAL_RELATIONSHIPS,
@@ -275,27 +283,41 @@ export interface StylePreferences {
   bgStyleId: string;
   lineStyleId: string;
   cardStyleId: string;
+  customBgConfig?: BackgroundStyleConfig;
+  customLineConfig?: LineStyleConfig;
+  customCardConfig?: CardStyleConfig;
+  savedCustomSchemes?: SavedCustomStyleScheme[];
 }
 
 const STORAGE_KEY_BG_STYLE = 'dc_crm_bg_style_v5';
 const STORAGE_KEY_LINE_STYLE = 'dc_crm_line_style_v5';
 const STORAGE_KEY_CARD_STYLE = 'dc_crm_card_style_v5';
+const STORAGE_KEY_CUSTOM_STYLE_CONFIGS = 'dc_crm_custom_style_configs_v6';
 
 export function loadSavedStylePreferences(): StylePreferences {
   try {
     const bg = localStorage.getItem(STORAGE_KEY_BG_STYLE);
     const line = localStorage.getItem(STORAGE_KEY_LINE_STYLE);
     const card = localStorage.getItem(STORAGE_KEY_CARD_STYLE);
+    const rawCustom = localStorage.getItem(STORAGE_KEY_CUSTOM_STYLE_CONFIGS);
+    const parsedCustom = rawCustom ? JSON.parse(rawCustom) : {};
     return {
       bgStyleId: bg || 'grid-dots-slate',
       lineStyleId: line || 'bezier-smooth',
       cardStyleId: card || 'classic-white',
+      customBgConfig: parsedCustom?.customBgConfig,
+      customLineConfig: parsedCustom?.customLineConfig,
+      customCardConfig: parsedCustom?.customCardConfig,
+      savedCustomSchemes: Array.isArray(parsedCustom?.savedCustomSchemes)
+        ? parsedCustom.savedCustomSchemes
+        : [],
     };
   } catch {
     return {
       bgStyleId: 'grid-dots-slate',
       lineStyleId: 'bezier-smooth',
       cardStyleId: 'classic-white',
+      savedCustomSchemes: [],
     };
   }
 }
@@ -305,6 +327,14 @@ export function saveStylePreferences(prefs: StylePreferences): void {
     localStorage.setItem(STORAGE_KEY_BG_STYLE, prefs.bgStyleId);
     localStorage.setItem(STORAGE_KEY_LINE_STYLE, prefs.lineStyleId);
     localStorage.setItem(STORAGE_KEY_CARD_STYLE, prefs.cardStyleId);
+    const customPayload = {
+      customBgConfig: prefs.customBgConfig,
+      customLineConfig: prefs.customLineConfig,
+      customCardConfig: prefs.customCardConfig,
+      savedCustomSchemes: prefs.savedCustomSchemes || [],
+    };
+    localStorage.setItem(STORAGE_KEY_CUSTOM_STYLE_CONFIGS, JSON.stringify(customPayload));
+    syncToSqlite(STORAGE_KEY_CUSTOM_STYLE_CONFIGS, customPayload);
   } catch (err) {
     console.warn('Failed to save style preferences:', err);
   }
@@ -340,3 +370,105 @@ export function saveToolbarPosition(pos: ToolbarPosition): void {
     localStorage.setItem(STORAGE_KEY_TOOLBAR_POS, JSON.stringify(pos));
   } catch {}
 }
+
+/**
+ * 构建默认基线历史快照（方便用户开箱即用体验「时间轴与版本快照增量对比」）
+ */
+function buildDefaultBaselineSnapshots(projectId: string): ProjectSnapshot[] {
+  const basePeople = loadSavedPeople(projectId);
+  const baseRels = loadSavedRelationships(projectId);
+  const baseFrames = loadSavedGroupFrames(projectId);
+  if (basePeople.length < 2) return [];
+
+  // 模拟 30 天前「一阶段立项摸底期」的历史状态：
+  // 1) 部分当前铁杆/温和支持者在立项初期尚处于接触摸底或中立状态
+  // 2) 移除最后 1 名后期新增的外部顾问或干系人，以及最后 1~2 条后期突破连线
+  const earlyPeople: Person[] = basePeople
+    .slice(0, Math.max(2, basePeople.length - 1))
+    .map((p, idx) => {
+      let earlyStage = p.relationshipStage;
+      if (p.relationshipStage === 'hot' && !p.tags?.includes('我方')) {
+        earlyStage = 'warm';
+      } else if (p.relationshipStage === 'warm' && idx % 2 === 0) {
+        earlyStage = 'exploring';
+      } else if (p.relationshipStage === 'exploring' && idx % 2 === 1) {
+        earlyStage = 'cold';
+      }
+      return {
+        ...p,
+        relationshipStage: earlyStage,
+      };
+    });
+
+  const earlyPersonIdSet = new Set(earlyPeople.map((p) => p.id));
+  const earlyRels: Relationship[] = baseRels
+    .filter((r) => earlyPersonIdSet.has(r.sourceId) && earlyPersonIdSet.has(r.targetId))
+    .slice(0, Math.max(1, baseRels.length - 1));
+
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+
+  return [
+    {
+      id: `snap-init-${projectId}`,
+      projectId,
+      title: '一阶段立项前摸底基线',
+      createdAt: `${thirtyDaysAgo} 10:00`,
+      note: '项目立项初期初次摸排的干系人态度与汇报链基线存档',
+      people: earlyPeople,
+      relationships: earlyRels,
+      frames: baseFrames,
+      annotations: [],
+    },
+  ];
+}
+
+export function loadProjectSnapshots(projectId: string = 'proj-huayun'): ProjectSnapshot[] {
+  try {
+    const raw = localStorage.getItem(`dc_crm_snapshots_v1_${projectId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to load project snapshots:', err);
+  }
+  return buildDefaultBaselineSnapshots(projectId);
+}
+
+export function saveProjectSnapshots(
+  snapshots: ProjectSnapshot[],
+  projectId: string = 'proj-huayun'
+): void {
+  try {
+    const key = `dc_crm_snapshots_v1_${projectId}`;
+    localStorage.setItem(key, JSON.stringify(snapshots));
+    syncToSqlite(key, snapshots);
+  } catch (err) {
+    console.warn('Failed to save project snapshots:', err);
+  }
+}
+
+export function loadCameraBookmarks(projectId: string = 'proj-huayun'): CameraBookmark[] {
+  try {
+    const raw = localStorage.getItem(`dc_crm_camera_bookmarks_v1_${projectId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveCameraBookmarks(
+  bookmarks: CameraBookmark[],
+  projectId: string = 'proj-huayun'
+): void {
+  try {
+    const key = `dc_crm_camera_bookmarks_v1_${projectId}`;
+    localStorage.setItem(key, JSON.stringify(bookmarks));
+    syncToSqlite(key, bookmarks);
+  } catch {}
+}
+

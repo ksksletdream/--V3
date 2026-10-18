@@ -2,7 +2,6 @@ import React, { useState, useRef } from 'react';
 import {
   PanelLeftClose,
   PanelLeftOpen,
-  Image as ImageIcon,
   HelpCircle,
   Download,
   Upload,
@@ -23,7 +22,11 @@ import {
   BarChart3,
   Network,
   Globe,
-  Sparkles,
+  ScanLine,
+  UserPlus,
+  X,
+  History,
+  Presentation,
 } from 'lucide-react';
 import { ProjectMap } from '../types/crm.ts';
 import { useLanguage } from '../context/LanguageContext.tsx';
@@ -46,7 +49,10 @@ interface TopNavProps {
   onRedo?: () => void;
   onAutoLayoutFaction?: () => void;
   onAutoLayoutHierarchy?: () => void;
-  onOpenInfluencePath?: () => void;
+  onOpenSnapshotDiff?: () => void;
+  hasActiveSnapshotDiff?: boolean;
+  isPresentationMode?: boolean;
+  onTogglePresentationMode?: () => void;
   onOpenOcrModal: () => void;
   onOpenStyleCenter: () => void;
   onOpenExportModal: () => void;
@@ -75,7 +81,10 @@ export const TopNav: React.FC<TopNavProps> = ({
   onRedo,
   onAutoLayoutFaction,
   onAutoLayoutHierarchy,
-  onOpenInfluencePath,
+  onOpenSnapshotDiff,
+  hasActiveSnapshotDiff = false,
+  isPresentationMode = false,
+  onTogglePresentationMode,
   onOpenOcrModal,
   onOpenStyleCenter,
   onOpenExportModal,
@@ -105,359 +114,368 @@ export const TopNav: React.FC<TopNavProps> = ({
   };
 
   return (
-    <div className="bg-white border-b border-slate-200 select-none z-30 shrink-0">
-      {/* Row 1: Strict 3-Zone Top Bar Contract */}
-      <header className="h-12 px-5 flex items-center justify-between gap-8 border-b border-slate-100">
-        {/* Zone 1: Single text element wordmark */}
-        <span
-          onClick={() => onChangeView('canvas')}
-          className="text-sm font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          {t('appTitle')}
-        </span>
+    <header className="h-12 px-3.5 bg-white border-b border-slate-200/90 flex items-center justify-between gap-3 select-none z-40 shrink-0">
+      {/* Left Zone: Sidebar Toggle + Compact Brand + Icon View Switcher + Active Project Selector */}
+      <div className="flex items-center gap-2 min-w-0 flex-1">
+        {activeView === 'canvas' && (
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors shrink-0 cursor-pointer"
+            title={sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar')}
+            aria-label={sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar')}
+          >
+            {sidebarCollapsed ? (
+              <PanelLeftOpen className="w-4 h-4" strokeWidth={1.6} />
+            ) : (
+              <PanelLeftClose className="w-4 h-4" strokeWidth={1.6} />
+            )}
+          </button>
+        )}
 
-        {/* Zone 2: 5 clean single-line navigation links */}
-        <nav className="hidden md:flex items-center gap-6 text-xs font-medium text-slate-600">
+        {/* Compact Iconized Brand Mark */}
+        <div
+          onClick={() => onChangeView('canvas')}
+          className="flex items-center gap-2 cursor-pointer shrink-0 group"
+          title={t('appTitle')}
+        >
+          <div className="w-7 h-7 rounded-lg bg-slate-900 group-hover:bg-blue-600 text-white flex items-center justify-center transition-colors shadow-2xs">
+            <Network className="w-3.5 h-3.5 text-blue-400 group-hover:text-white transition-colors" strokeWidth={1.8} />
+          </div>
+          <span className="hidden sm:inline text-xs font-bold tracking-tight text-slate-900">
+            {language === 'zh' ? '智算作战室' : 'DC-CRM'}
+          </span>
+        </div>
+
+        <div className="h-4 w-[1px] bg-slate-200 shrink-0 mx-0.5" />
+
+        {/* Icon-Only Segmented View Switcher (Dashboard vs Topology Canvas) */}
+        <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 border border-slate-200/70 rounded-lg shrink-0">
           <button
             type="button"
             onClick={() => onChangeView('dashboard')}
-            className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer underline-offset-4 ${
+            className={`p-1.5 rounded-md transition-all cursor-pointer flex items-center justify-center ${
               activeView === 'dashboard'
-                ? 'text-blue-600 font-bold underline'
-                : 'hover:text-slate-900 hover:underline'
+                ? 'bg-white text-blue-600 shadow-2xs'
+                : 'text-slate-500 hover:text-slate-900'
             }`}
+            title={t('navDashboard')}
+            aria-label={t('navDashboard')}
           >
-            {t('navDashboard')}
+            <BarChart3 className="w-3.5 h-3.5" strokeWidth={1.7} />
           </button>
           <button
             type="button"
             onClick={() => onChangeView('canvas')}
-            className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer underline-offset-4 ${
+            className={`p-1.5 rounded-md transition-all cursor-pointer flex items-center justify-center ${
               activeView === 'canvas'
-                ? 'text-blue-600 font-bold underline'
-                : 'hover:text-slate-900 hover:underline'
+                ? 'bg-white text-blue-600 shadow-2xs'
+                : 'text-slate-500 hover:text-slate-900'
             }`}
+            title={t('navCanvas')}
+            aria-label={t('navCanvas')}
           >
-            {t('navCanvas')}
-          </button>
-          <button
-            type="button"
-            onClick={onOpenInfluencePath}
-            className="hover:text-slate-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {t('navInfluencePath')}
-          </button>
-          <button
-            type="button"
-            onClick={onOpenStyleCenter}
-            className="hover:text-slate-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {t('navStyleCenter')}
-          </button>
-          <button
-            type="button"
-            onClick={onOpenExportModal}
-            className="hover:text-slate-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {t('navExport')}
-          </button>
-        </nav>
-
-        {/* Zone 3: Language Switcher + 1 Primary Action */}
-        <div className="flex items-center gap-3 shrink-0">
-          <button
-            type="button"
-            onClick={toggleLanguage}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors whitespace-nowrap cursor-pointer"
-            title={language === 'zh' ? 'Switch to English' : '切换至简体中文'}
-          >
-            <Globe className="w-3.5 h-3.5 text-slate-500" strokeWidth={1.5} />
-            <span className="font-mono text-[11px] font-semibold">{t('languageSwitch')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenNewPerson}
-            className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
-          >
-            {t('newStakeholder')}
+            <Network className="w-3.5 h-3.5" strokeWidth={1.7} />
           </button>
         </div>
-      </header>
 
-      {/* Row 2: Data Center Project Engineering Ledger & Workspace Toolbar */}
-      <div className="h-10 px-4 bg-slate-50/80 flex items-center justify-between gap-4 text-xs">
-        {/* Left: View Switcher + Sidebar Toggle + Active Project Selector + Unboxed Telemetry */}
-        <div className="flex items-center gap-2.5 min-w-0 flex-1">
-          {activeView === 'canvas' && (
-            <button
-              type="button"
-              onClick={onToggleSidebar}
-              className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-200/60 rounded-md transition-colors shrink-0 cursor-pointer"
-              title={sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar')}
-              aria-label={sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar')}
-            >
-              {sidebarCollapsed ? (
-                <PanelLeftOpen className="w-4 h-4" strokeWidth={1.5} />
-              ) : (
-                <PanelLeftClose className="w-4 h-4" strokeWidth={1.5} />
-              )}
-            </button>
-          )}
+        {/* Active Project Selector Pill with Condensed Telemetry Badges */}
+        <div className="relative min-w-0">
+          <button
+            type="button"
+            onClick={() => {
+              setShowProjectMenu(!showProjectMenu);
+              setShowLayoutMenu(false);
+              setShowExportMenu(false);
+            }}
+            className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 hover:bg-slate-100 border border-slate-200/90 rounded-lg text-xs font-semibold text-slate-800 transition-colors cursor-pointer max-w-full"
+            title={`${activeProject.name} · ${activeProject.companyName} · ${activeProject.scaleMw} · ${activeProject.targetPue} · ${activeProject.contractBudget} · ${activeProject.biddingStage}`}
+            aria-label={t('switchProject')}
+          >
+            <Server className="w-3.5 h-3.5 text-blue-600 shrink-0" strokeWidth={1.6} />
+            <span className="truncate max-w-[140px] sm:max-w-[220px] md:max-w-[260px]">
+              {activeProject.name}
+            </span>
+            <span className="hidden lg:inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-white border border-slate-200/80 text-[10px] font-mono text-slate-600 shrink-0">
+              <span>{activeProject.scaleMw || '32 MW'}</span>
+              <span className="text-slate-300">·</span>
+              <span className="text-emerald-700 font-semibold">{activeProject.targetPue || 'PUE≤1.15'}</span>
+              <span className="text-slate-300">·</span>
+              <span className="text-blue-600 font-semibold">{activeProject.contractBudget || '¥4.85亿'}</span>
+            </span>
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" strokeWidth={1.6} />
+          </button>
 
-          {/* Segmented View Switcher (Dashboard vs Canvas) */}
-          <div className="flex items-center gap-0.5 p-0.5 bg-slate-200/75 rounded-lg shrink-0">
-            <button
-              type="button"
-              onClick={() => onChangeView('dashboard')}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                activeView === 'dashboard'
-                  ? 'bg-white text-blue-600 shadow-2xs font-semibold'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
+          {showProjectMenu && (
+            <div
+              className="absolute left-0 mt-1.5 w-[420px] max-w-[92vw] bg-white border border-slate-200 rounded-xl shadow-xl py-2 z-50"
+              onMouseLeave={() => setShowProjectMenu(false)}
             >
-              <BarChart3 className="w-3.5 h-3.5" strokeWidth={1.5} />
-              <span>{t('navDashboard')}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onChangeView('canvas')}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                activeView === 'canvas'
-                  ? 'bg-white text-blue-600 shadow-2xs font-semibold'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Network className="w-3.5 h-3.5" strokeWidth={1.5} />
-              <span>{t('navCanvas')}</span>
-            </button>
-          </div>
-
-          {/* Project Switcher Dropdown */}
-          <div className="relative shrink-0">
-            <button
-              type="button"
-              onClick={() => setShowProjectMenu(!showProjectMenu)}
-              className="flex items-center gap-1.5 px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded-md text-xs font-semibold text-slate-900 transition-colors whitespace-nowrap cursor-pointer"
-              aria-label={t('switchProject')}
-            >
-              <Server className="w-3.5 h-3.5 text-blue-600 shrink-0" strokeWidth={1.5} />
-              <span className="max-w-[155px] sm:max-w-[300px] truncate">{activeProject.name}</span>
-              <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" strokeWidth={1.5} />
-            </button>
-
-            {showProjectMenu && (
-              <div
-                className="absolute left-0 mt-1.5 w-[440px] max-w-[92vw] bg-white border border-slate-200 rounded-xl shadow-xl py-2 z-50"
-                onMouseLeave={() => setShowProjectMenu(false)}
-              >
-                <div className="px-3.5 py-1 text-[11px] font-semibold text-slate-400 border-b border-slate-100 flex items-center justify-between">
-                  <span>{t('switchProject')} ({projects.length})</span>
+              <div className="px-3.5 py-1.5 text-[11px] font-semibold text-slate-400 border-b border-slate-100 flex items-center justify-between">
+                <span>
+                  {t('switchProject')} ({projects.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowProjectMenu(false);
+                    onChangeView('dashboard');
+                  }}
+                  className="text-blue-600 hover:underline cursor-pointer"
+                >
+                  {t('openProjectDashboard')}
+                </button>
+              </div>
+              {projects.map((proj) => {
+                const isCurrent = proj.id === activeProject.id;
+                return (
                   <button
+                    key={proj.id}
                     type="button"
                     onClick={() => {
+                      onSelectProject(proj.id);
                       setShowProjectMenu(false);
-                      onChangeView('dashboard');
                     }}
-                    className="text-blue-600 hover:underline cursor-pointer"
+                    className={`w-full px-3.5 py-2.5 text-left transition-colors flex flex-col gap-1 border-b border-slate-50 last:border-b-0 cursor-pointer ${
+                      isCurrent ? 'bg-blue-50/70' : 'hover:bg-slate-50'
+                    }`}
                   >
-                    {t('openProjectDashboard')}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`font-bold text-xs ${isCurrent ? 'text-blue-700' : 'text-slate-900'}`}>
+                        {proj.name}
+                      </span>
+                      <span className="font-mono tabular-nums text-[11px] font-semibold text-blue-600 shrink-0">
+                        {proj.contractBudget}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap font-mono tabular-nums">
+                      <span className="flex items-center gap-1">
+                        <Building2 className="w-3 h-3 text-slate-400" strokeWidth={1.5} />
+                        {proj.companyName}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span>{proj.scaleMw}</span>
+                      <span aria-hidden="true">·</span>
+                      <span className="text-emerald-700">{proj.targetPue}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{proj.biddingStage}</span>
+                    </div>
                   </button>
-                </div>
-                {projects.map((proj) => {
-                  const isCurrent = proj.id === activeProject.id;
-                  return (
-                    <button
-                      key={proj.id}
-                      type="button"
-                      onClick={() => {
-                        onSelectProject(proj.id);
-                        setShowProjectMenu(false);
-                      }}
-                      className={`w-full px-3.5 py-2.5 text-left transition-colors flex flex-col gap-1 border-b border-slate-50 last:border-b-0 cursor-pointer ${
-                        isCurrent ? 'bg-blue-50/70' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className={`font-bold text-xs ${isCurrent ? 'text-blue-700' : 'text-slate-900'}`}>
-                          {proj.name}
-                        </span>
-                        <span className="font-mono tabular-nums text-[11px] font-semibold text-blue-600 shrink-0">
-                          {proj.contractBudget}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap font-mono tabular-nums">
-                        <span>{proj.companyName}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{proj.scaleMw}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{proj.targetPue}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{proj.biddingStage}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Unboxed Data Center Engineering Telemetry Metadata */}
-          <div className="hidden xl:flex items-center gap-2 text-[11px] text-slate-500 truncate font-mono tabular-nums">
-            <span className="text-slate-700 font-medium flex items-center gap-1">
-              <Building2 className="w-3 h-3 text-slate-400" strokeWidth={1.5} />
-              {activeProject.companyName}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>{activeProject.scaleMw || '32 MW'}</span>
-            <span aria-hidden="true">·</span>
-            <span className="text-emerald-700 font-semibold">{activeProject.targetPue || 'PUE ≤ 1.15'}</span>
-            <span aria-hidden="true">·</span>
-            <span className="text-blue-700 font-semibold">{t('budgetLabel')} {activeProject.contractBudget || '¥ 4.85 亿'}</span>
-            <span aria-hidden="true">·</span>
-            <span className="text-slate-600">{activeProject.biddingStage}</span>
-          </div>
-
-          {/* Active Focus Indicator */}
-          {focusedPersonName && (
-            <div className="flex items-center gap-1.5 text-blue-700 text-xs font-medium shrink-0">
-              <span>{t('focusLabel')}: {focusedPersonName}</span>
-              <button
-                type="button"
-                onClick={onClearFocus}
-                className="hover:text-blue-950 font-bold px-1 cursor-pointer"
-                title={t('clearFocus')}
-              >
-                ×
-              </button>
+                );
+              })}
             </div>
           )}
         </div>
 
-        {/* Right: Workspace Canvas Controls */}
-        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-          {activeView === 'canvas' && (
-            <>
-              {/* Undo / Redo */}
-              <div className="hidden lg:flex items-center gap-0.5 border-r border-slate-200 pr-2 mr-1">
-                <button
-                  type="button"
-                  onClick={onUndo}
-                  disabled={!canUndo}
-                  className="p-1 text-slate-500 hover:text-slate-800 hover:bg-slate-200/60 rounded transition-colors disabled:opacity-30 cursor-pointer"
-                  title={t('undo')}
-                  aria-label={t('undo')}
-                >
-                  <Undo2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                </button>
-                <button
-                  type="button"
-                  onClick={onRedo}
-                  disabled={!canRedo}
-                  className="p-1 text-slate-500 hover:text-slate-800 hover:bg-slate-200/60 rounded transition-colors disabled:opacity-30 cursor-pointer"
-                  title={t('redo')}
-                  aria-label={t('redo')}
-                >
-                  <Redo2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                </button>
-              </div>
+        {/* Compact Active Focus Badge */}
+        {focusedPersonName && (
+          <div className="hidden md:flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded-md text-blue-700 text-[11px] font-medium shrink-0">
+            <span className="truncate max-w-[120px]">{focusedPersonName}</span>
+            <button
+              type="button"
+              onClick={onClearFocus}
+              className="hover:text-blue-950 p-0.5 rounded hover:bg-blue-100 cursor-pointer"
+              title={t('clearFocus')}
+            >
+              <X className="w-3 h-3" strokeWidth={2} />
+            </button>
+          </div>
+        )}
+      </div>
 
-              {/* Layer Manager Toggle */}
+      {/* Right Zone: Pure Iconized Action Dock (Minimal Text, Clear Visual Grouping) */}
+      <div className="flex items-center gap-1 shrink-0">
+        {activeView === 'canvas' && (
+          <>
+            {/* Undo / Redo Icon Group */}
+            <div className="hidden sm:flex items-center gap-0.5 bg-slate-50 border border-slate-200/80 rounded-lg p-0.5">
               <button
                 type="button"
-                onClick={onToggleLayerPanel}
-                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer border ${
-                  isLayerPanelOpen
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-slate-700 hover:bg-slate-100 border-slate-200'
-                }`}
-                title={t('layerManagerTip')}
+                onClick={onUndo}
+                disabled={!canUndo}
+                className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded-md transition-colors disabled:opacity-30 cursor-pointer"
+                title={t('undo')}
+                aria-label={t('undo')}
               >
-                <Layers className="w-3.5 h-3.5" strokeWidth={1.5} />
-                <span className="hidden sm:inline">{t('layerManager')}</span>
+                <Undo2 className="w-3.5 h-3.5" strokeWidth={1.6} />
               </button>
+              <button
+                type="button"
+                onClick={onRedo}
+                disabled={!canRedo}
+                className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded-md transition-colors disabled:opacity-30 cursor-pointer"
+                title={t('redo')}
+                aria-label={t('redo')}
+              >
+                <Redo2 className="w-3.5 h-3.5" strokeWidth={1.6} />
+              </button>
+            </div>
 
-              {/* Auto Layout Dropdown */}
-              <div className="relative hidden md:block">
-                <button
-                  type="button"
-                  onClick={() => setShowLayoutMenu(!showLayoutMenu)}
-                  className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 rounded-md transition-colors whitespace-nowrap cursor-pointer"
-                  title={t('autoLayout')}
-                >
-                  <LayoutGrid className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-                  <span className="hidden sm:inline">{t('autoLayout')}</span>
-                </button>
-                {showLayoutMenu && (
-                  <div
-                    className="absolute right-0 mt-1.5 w-60 bg-white border border-slate-200 rounded-lg shadow-lg py-1.5 z-50 text-xs"
-                    onMouseLeave={() => setShowLayoutMenu(false)}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowLayoutMenu(false);
-                        onAutoLayoutFaction?.();
-                      }}
-                      className="w-full px-3.5 py-2 text-left text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors cursor-pointer"
-                    >
-                      <GitFork className="w-3.5 h-3.5 text-blue-600" strokeWidth={1.5} />
-                      <div>
-                        <div className="font-medium text-slate-900">{t('factionLayout')}</div>
-                        <div className="text-[10px] text-slate-400">{t('factionLayoutDesc')}</div>
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowLayoutMenu(false);
-                        onAutoLayoutHierarchy?.();
-                      }}
-                      className="w-full px-3.5 py-2 text-left text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors border-t border-slate-100 cursor-pointer"
-                    >
-                      <Layers className="w-3.5 h-3.5 text-indigo-600" strokeWidth={1.5} />
-                      <div>
-                        <div className="font-medium text-slate-900">{t('hierarchyLayout')}</div>
-                        <div className="text-[10px] text-slate-400">{t('hierarchyLayoutDesc')}</div>
-                      </div>
-                    </button>
-                  </div>
-                )}
-              </div>
-            </>
+            <div className="hidden sm:block h-4 w-[1px] bg-slate-200 mx-0.5" />
+          </>
+        )}
+
+        {/* Tactical Analysis & Canvas Organization Icon Group */}
+        <div className="flex items-center gap-0.5 bg-slate-50 border border-slate-200/80 rounded-lg p-0.5">
+          {/* Historical Snapshot & Diff Comparison */}
+          {onOpenSnapshotDiff && (
+            <button
+              type="button"
+              onClick={onOpenSnapshotDiff}
+              className={`relative p-1.5 rounded-md transition-colors cursor-pointer ${
+                hasActiveSnapshotDiff
+                  ? 'bg-amber-500 text-slate-950 shadow-2xs'
+                  : 'text-slate-600 hover:text-amber-600 hover:bg-white'
+              }`}
+              title="⏱ 历史快照与演进对比 (Snapshot Diff)"
+              aria-label="历史快照对比"
+            >
+              <History className="w-4 h-4" strokeWidth={1.6} />
+              {hasActiveSnapshotDiff && (
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-white" />
+              )}
+            </button>
           )}
 
-          {/* OCR Entry */}
+          {/* Presentation & Spotlight Mode (Canvas Only) */}
+          {activeView === 'canvas' && onTogglePresentationMode && (
+            <button
+              type="button"
+              onClick={onTogglePresentationMode}
+              className={`px-2 py-1 rounded-md transition-colors flex items-center gap-1 text-[11px] font-bold cursor-pointer ${
+                isPresentationMode
+                  ? 'bg-indigo-600 text-white shadow-2xs'
+                  : 'text-indigo-700 bg-indigo-50/90 hover:bg-indigo-600 hover:text-white'
+              }`}
+              title="🎬 进入路演汇报聚焦模式 (阵营镜头巡航 · 激光笔 · 节点聚光灯)"
+              aria-label="路演汇报"
+            >
+              <Presentation className="w-3.5 h-3.5" strokeWidth={1.8} />
+              <span className="hidden lg:inline">路演汇报</span>
+            </button>
+          )}
+
+          {/* Auto Layout Dropdown (Canvas Only) */}
+          {activeView === 'canvas' && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLayoutMenu(!showLayoutMenu);
+                  setShowProjectMenu(false);
+                  setShowExportMenu(false);
+                }}
+                className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                  showLayoutMenu
+                    ? 'bg-white text-blue-600 shadow-2xs'
+                    : 'text-slate-600 hover:text-blue-600 hover:bg-white'
+                }`}
+                title={t('autoLayout')}
+                aria-label={t('autoLayout')}
+              >
+                <LayoutGrid className="w-4 h-4" strokeWidth={1.6} />
+              </button>
+
+              {showLayoutMenu && (
+                <div
+                  className="absolute right-0 mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl py-1.5 z-50 text-xs"
+                  onMouseLeave={() => setShowLayoutMenu(false)}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowLayoutMenu(false);
+                      onAutoLayoutFaction?.();
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-slate-700 hover:bg-slate-50 flex items-center gap-2.5 transition-colors cursor-pointer"
+                  >
+                    <GitFork className="w-4 h-4 text-blue-600 shrink-0" strokeWidth={1.6} />
+                    <div>
+                      <div className="font-semibold text-slate-900">{t('factionLayout')}</div>
+                      <div className="text-[10px] text-slate-400">{t('factionLayoutDesc')}</div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowLayoutMenu(false);
+                      onAutoLayoutHierarchy?.();
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-slate-700 hover:bg-slate-50 flex items-center gap-2.5 transition-colors border-t border-slate-100 cursor-pointer"
+                  >
+                    <Layers className="w-4 h-4 text-indigo-600 shrink-0" strokeWidth={1.6} />
+                    <div>
+                      <div className="font-semibold text-slate-900">{t('hierarchyLayout')}</div>
+                      <div className="text-[10px] text-slate-400">{t('hierarchyLayoutDesc')}</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Layer Manager Toggle (Canvas Only) */}
+          {activeView === 'canvas' && (
+            <button
+              type="button"
+              onClick={onToggleLayerPanel}
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                isLayerPanelOpen
+                  ? 'bg-blue-600 text-white shadow-2xs'
+                  : 'text-slate-600 hover:text-blue-600 hover:bg-white'
+              }`}
+              title={t('layerManagerTip')}
+              aria-label={t('layerManager')}
+            >
+              <Layers className="w-4 h-4" strokeWidth={1.6} />
+            </button>
+          )}
+
+          {/* Business Card OCR */}
           <button
             type="button"
             onClick={onOpenOcrModal}
-            className="hidden md:flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+            className="p-1.5 text-slate-600 hover:text-indigo-600 hover:bg-white rounded-md transition-colors cursor-pointer"
             title={t('ocrBtnTip')}
+            aria-label={t('ocrBtn')}
           >
-            <ImageIcon className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-            <span className="hidden sm:inline">{t('ocrBtn')}</span>
+            <ScanLine className="w-4 h-4" strokeWidth={1.6} />
           </button>
+        </div>
 
+        <div className="h-4 w-[1px] bg-slate-200 mx-0.5" />
+
+        {/* Style, Export, Language & Help Icon Group */}
+        <div className="flex items-center gap-0.5 bg-slate-50 border border-slate-200/80 rounded-lg p-0.5">
           {/* Style Center */}
           <button
             type="button"
             onClick={onOpenStyleCenter}
-            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+            className="p-1.5 text-slate-600 hover:text-purple-600 hover:bg-white rounded-md transition-colors cursor-pointer"
             title={t('styleCenterTip')}
+            aria-label={t('navStyleCenter')}
           >
-            <Palette className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-            <span className="hidden sm:inline">{t('navStyleCenter')}</span>
+            <Palette className="w-4 h-4" strokeWidth={1.6} />
           </button>
 
-          {/* Export Menu */}
+          {/* Export & Backup Dropdown */}
           <div className="relative">
             <button
               type="button"
-              onClick={() => setShowExportMenu(!showExportMenu)}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 rounded-md transition-colors whitespace-nowrap border border-slate-200 cursor-pointer"
+              onClick={() => {
+                setShowExportMenu(!showExportMenu);
+                setShowProjectMenu(false);
+                setShowLayoutMenu(false);
+              }}
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                showExportMenu
+                  ? 'bg-white text-blue-600 shadow-2xs'
+                  : 'text-slate-600 hover:text-blue-600 hover:bg-white'
+              }`}
+              title={t('exportAndBackup')}
+              aria-label={t('exportAndBackup')}
             >
-              <Download className="w-3.5 h-3.5 text-slate-600" strokeWidth={1.5} />
-              <span className="hidden sm:inline">{t('exportAndBackup')}</span>
+              <Download className="w-4 h-4" strokeWidth={1.6} />
             </button>
 
             {showExportMenu && (
@@ -557,18 +575,40 @@ export const TopNav: React.FC<TopNavProps> = ({
             />
           </div>
 
-          {/* Quick Help */}
+          {/* Language Switcher Icon */}
+          <button
+            type="button"
+            onClick={toggleLanguage}
+            className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded-md transition-colors cursor-pointer relative"
+            title={language === 'zh' ? 'Switch to English' : '切换至简体中文'}
+            aria-label={language === 'zh' ? 'Switch to English' : '切换至简体中文'}
+          >
+            <Globe className="w-4 h-4" strokeWidth={1.6} />
+          </button>
+
+          {/* Quick Help Icon */}
           <button
             type="button"
             onClick={onOpenQuickHelp}
-            className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-200/60 rounded-md transition-colors cursor-pointer"
+            className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded-md transition-colors cursor-pointer"
             title={t('shortcutsAndGuide')}
             aria-label={t('shortcutsAndGuide')}
           >
-            <HelpCircle className="w-4 h-4" strokeWidth={1.5} />
+            <HelpCircle className="w-4 h-4" strokeWidth={1.6} />
           </button>
         </div>
+
+        {/* Primary Action: New Stakeholder Icon Button */}
+        <button
+          type="button"
+          onClick={onOpenNewPerson}
+          className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors shrink-0 cursor-pointer shadow-2xs flex items-center justify-center"
+          title={t('newStakeholder')}
+          aria-label={t('newStakeholder')}
+        >
+          <UserPlus className="w-4 h-4" strokeWidth={1.8} />
+        </button>
       </div>
-    </div>
+    </header>
   );
 };

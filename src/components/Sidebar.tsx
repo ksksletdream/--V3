@@ -129,10 +129,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             onClick={onNewPerson}
-            className="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1 px-2 py-1 rounded hover:bg-blue-50 transition-colors whitespace-nowrap cursor-pointer"
+            className="p-1.5 text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors shrink-0 cursor-pointer"
+            title={t('newStakeholder')}
+            aria-label={t('newStakeholder')}
           >
-            <UserPlus className="w-3.5 h-3.5" strokeWidth={1.5} />
-            <span>{t('newStakeholder')}</span>
+            <UserPlus className="w-4 h-4" strokeWidth={1.7} />
           </button>
         </div>
 
@@ -267,11 +268,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <button
                       type="button"
                       onClick={() => onAddToCanvas(person.id)}
-                      className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 font-medium flex items-center gap-0.5 transition-colors cursor-pointer"
+                      className="p-1 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors cursor-pointer"
                       title={t('sidebarAddToCanvas')}
+                      aria-label={t('sidebarAddToCanvas')}
                     >
-                      <ArrowUpRight className="w-3 h-3 text-blue-600" strokeWidth={1.5} />
-                      <span>{language === 'zh' ? '上画' : 'Place'}</span>
+                      <ArrowUpRight className="w-3.5 h-3.5 text-blue-600" strokeWidth={1.7} />
                     </button>
                   ) : (
                     <button

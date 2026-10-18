@@ -18,7 +18,8 @@ export type BackgroundStyleId =
   | 'misty-marine'
   | 'concrete-slate'
   | 'sunset-amber'
-  | 'deep-cosmos';
+  | 'deep-cosmos'
+  | 'custom-bg';
 
 export type LineStyleId =
   | 'bezier-smooth'
@@ -40,7 +41,8 @@ export type LineStyleId =
   | 'warning-hazard'
   | 'sketch-handdrawn'
   | 'floating-3d-shadow'
-  | 'bidirectional-arrows';
+  | 'bidirectional-arrows'
+  | 'custom-line';
 
 export type CardStyleId =
   | 'classic-white'
@@ -62,12 +64,13 @@ export type CardStyleId =
   | 'matrix-terminal'
   | 'royal-velvet'
   | 'outline-wireframe'
-  | 'watercolor-blush';
+  | 'watercolor-blush'
+  | 'custom-card';
 
 export interface BackgroundStyleConfig {
   id: BackgroundStyleId;
   name: string;
-  category: 'light' | 'dark' | 'gradient' | 'texture';
+  category: 'light' | 'dark' | 'gradient' | 'texture' | 'custom';
   desc: string;
   isDark: boolean;
   backgroundColor: string;
@@ -75,12 +78,18 @@ export interface BackgroundStyleConfig {
   backgroundSize?: string;
   previewBg: string;
   accentColor: string;
+  /** Explicit pattern metadata for custom designer & 100% export fidelity */
+  patternType?: 'dots' | 'grid' | 'diagonal' | 'gradient' | 'solid';
+  patternColor?: string;
+  spacing?: number;
+  dotRadius?: number;
+  gradientStops?: [string, string, string];
 }
 
 export interface LineStyleConfig {
   id: LineStyleId;
   name: string;
-  category: 'standard' | 'geometry' | 'dash' | 'special';
+  category: 'standard' | 'geometry' | 'dash' | 'special' | 'custom';
   desc: string;
   lineType: 'bezier' | 'straight' | 'step' | 'arc';
   strokeDasharray?: string;
@@ -94,7 +103,7 @@ export interface LineStyleConfig {
 export interface CardStyleConfig {
   id: CardStyleId;
   name: string;
-  category: 'classic' | 'modern' | 'creative' | 'dark';
+  category: 'classic' | 'modern' | 'creative' | 'dark' | 'custom';
   desc: string;
   isDarkCard: boolean;
   borderClass: string;
@@ -102,4 +111,21 @@ export interface CardStyleConfig {
   shadowClass: string;
   roundedClass: string;
   accentStyle: 'bar' | 'glow' | 'tag' | 'full' | 'ribbon' | 'minimal' | 'frame';
+  /** Optional custom inline design properties */
+  customBgColor?: string;
+  customBorderColor?: string;
+  customBorderWidth?: number;
+  customBorderStyle?: 'solid' | 'dashed';
+  customBorderRadius?: number;
 }
+
+export interface SavedCustomStyleScheme {
+  id: string;
+  name: string;
+  desc: string;
+  createdAt: number;
+  bgConfig: BackgroundStyleConfig;
+  lineConfig: LineStyleConfig;
+  cardConfig: CardStyleConfig;
+}
+

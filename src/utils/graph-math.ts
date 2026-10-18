@@ -633,7 +633,11 @@ export function isPointNearAnnotation(
     return false;
   }
 
-  if (ann.kind === 'sticky' || (ann.kind === 'shape' && (!ann.points || ann.points.length === 0))) {
+  if (
+    ann.kind === 'sticky' ||
+    ann.kind === 'text' ||
+    (ann.kind === 'shape' && (!ann.points || ann.points.length === 0))
+  ) {
     return (
       pt.x >= ann.x - threshold * 0.5 &&
       pt.x <= ann.x + ann.width + threshold * 0.5 &&
@@ -658,6 +662,561 @@ export function isPointNearAnnotation(
   }
 
   return false;
+}
+
+/**
+ * Removes tiny accidental mouse-release / mouse-press micro-hooks at the ends of a raw stroke
+ * so that freehand curves end smoothly along their natural trajectory.
+ */
+export function cleanStrokeEndpoints(points: Point[]): Point[] {
+  if (points.length <= 3) return points;
+  let pts = [...points];
+
+  // Trim trailing micro-hooks (within last 6px if angle deviates sharply from preceding trajectory)
+  for (let pass = 0; pass < 2 && pts.length > 3; pass++) {
+    const n = pts.length;
+    const last = pts[n - 1];
+    const prev1 = pts[n - 2];
+    const prev2 = pts[Math.max(0, n - 4)];
+    const tailSegLen = Math.hypot(last.x - prev1.x, last.y - prev1.y);
+    const bodySegLen = Math.hypot(prev1.x - prev2.x, prev1.y - prev2.y);
+    if (tailSegLen < 6.5 && bodySegLen > 4) {
+      const v1x = (prev1.x - prev2.x) / bodySegLen;
+      const v1y = (prev1.y - prev2.y) / bodySegLen;
+      const v2x = (last.x - prev1.x) / (tailSegLen || 1);
+      const v2y = (last.y - prev1.y) / (tailSegLen || 1);
+      const dot = v1x * v2x + v1y * v2y;
+      if (dot < 0.65) {
+        pts.pop();
+      }
+    }
+  }
+
+  // Trim leading micro-hooks at start
+  for (let pass = 0; pass < 2 && pts.length > 3; pass++) {
+    const first = pts[0];
+    const next1 = pts[1];
+    const next2 = pts[Math.min(pts.length - 1, 3)];
+    const headSegLen = Math.hypot(first.x - next1.x, first.y - next1.y);
+    const bodySegLen = Math.hypot(next1.x - next2.x, next1.y - next2.y);
+    if (headSegLen < 6.5 && bodySegLen > 4) {
+      const v1x = (next1.x - next2.x) / bodySegLen;
+      const v1y = (next1.y - next2.y) / bodySegLen;
+      const v2x = (first.x - next1.x) / (headSegLen || 1);
+      const v2y = (first.y - next1.y) / (headSegLen || 1);
+      const dot = v1x * v2x + v1y * v2y;
+      if (dot < 0.65) {
+        pts.shift();
+      }
+    }
+  }
+
+  return pts;
+}
+
+/**
+ * Interpolates a point along a polyline at a specified arc-length distance from either 'end' or 'start'.
+ */
+function samplePointAtArcDistanceFromEnd(
+  pts: Point[],
+  targetDist: number,
+  fromEnd: 'end' | 'start'
+): Point {
+  if (pts.length === 0) return { x: 0, y: 0 };
+  if (pts.length === 1) return pts[0];
+
+  let accumulated = 0;
+  if (fromEnd === 'end') {
+    for (let i = pts.length - 1; i > 0; i--) {
+      const curr = pts[i];
+      const prev = pts[i - 1];
+      const segLen = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+      if (segLen < 1e-4) continue;
+      if (accumulated + segLen >= targetDist) {
+        const remain = targetDist - accumulated;
+        const ratio = remain / segLen;
+        return {
+          x: curr.x + (prev.x - curr.x) * ratio,
+          y: curr.y + (prev.y - curr.y) * ratio,
+        };
+      }
+      accumulated += segLen;
+    }
+    return pts[0];
+  } else {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const curr = pts[i];
+      const next = pts[i + 1];
+      const segLen = Math.hypot(next.x - curr.x, next.y - curr.y);
+      if (segLen < 1e-4) continue;
+      if (accumulated + segLen >= targetDist) {
+        const remain = targetDist - accumulated;
+        const ratio = remain / segLen;
+        return {
+          x: curr.x + (next.x - curr.x) * ratio,
+          y: curr.y + (next.y - curr.y) * ratio,
+        };
+      }
+      accumulated += segLen;
+    }
+    return pts[pts.length - 1];
+  }
+}
+
+/**
+ * Computes a natural, tangent-aligned swept arrowhead for freehand or straight strokes.
+ * Walks along the actual arc-length of the curve (blending near and medium lookback distances)
+ * so the arrow direction always matches the natural flow of the line at its endpoint.
+ */
+export function computeNaturalArrowhead(
+  worldPts: Point[],
+  strokeWidth: number,
+  whichEnd: 'end' | 'start' = 'end'
+): {
+  tip: Point;
+  leftWing: Point;
+  notch: Point;
+  rightWing: Point;
+  angle: number;
+  polygonPoints: string;
+} | null {
+  if (!worldPts || worldPts.length < 2) return null;
+
+  let totalLen = 0;
+  for (let i = 1; i < worldPts.length; i++) {
+    totalLen += Math.hypot(
+      worldPts[i].x - worldPts[i - 1].x,
+      worldPts[i].y - worldPts[i - 1].y
+    );
+  }
+  if (totalLen < 2) return null;
+
+  const anchor = whichEnd === 'end' ? worldPts[worldPts.length - 1] : worldPts[0];
+
+  // Sample two points along the curve's arc length from the endpoint to get a stable, natural tangent
+  const nearDist = Math.min(totalLen * 0.45, Math.max(8, strokeWidth * 2.2));
+  const midDist = Math.min(totalLen * 0.75, Math.max(18, strokeWidth * 4.5));
+
+  const nearPt = samplePointAtArcDistanceFromEnd(worldPts, nearDist, whichEnd);
+  const midPt = samplePointAtArcDistanceFromEnd(worldPts, midDist, whichEnd);
+
+  const vNearX = anchor.x - nearPt.x;
+  const vNearY = anchor.y - nearPt.y;
+  const lenNear = Math.hypot(vNearX, vNearY) || 1;
+
+  const vMidX = anchor.x - midPt.x;
+  const vMidY = anchor.y - midPt.y;
+  const lenMid = Math.hypot(vMidX, vMidY) || 1;
+
+  // Blend 65% local tangent + 35% medium-range tangent for smooth curve alignment without micro-jitter
+  const dirX = (vNearX / lenNear) * 0.65 + (vMidX / lenMid) * 0.35;
+  const dirY = (vNearY / lenNear) * 0.65 + (vMidY / lenMid) * 0.35;
+  const angle = Math.atan2(dirY, dirX);
+
+  const headLen = Math.max(13, strokeWidth * 3.4);
+  const wingAngle = Math.PI / 6.4; // ~28 degrees sleek swept wing
+
+  // Extend the tip slightly forward along the tangent so the stroke's round cap is tucked inside the arrowhead
+  const tipAdvance = Math.max(2, strokeWidth * 0.55);
+  const tip = {
+    x: anchor.x + Math.cos(angle) * tipAdvance,
+    y: anchor.y + Math.sin(angle) * tipAdvance,
+  };
+
+  const leftWing = {
+    x: tip.x - headLen * Math.cos(angle - wingAngle),
+    y: tip.y - headLen * Math.sin(angle - wingAngle),
+  };
+
+  const rightWing = {
+    x: tip.x - headLen * Math.cos(angle + wingAngle),
+    y: tip.y - headLen * Math.sin(angle + wingAngle),
+  };
+
+  // Swept-back inner notch for a crisp, natural tactical arrowhead look
+  const notchDepth = headLen * 0.74;
+  const notch = {
+    x: tip.x - notchDepth * Math.cos(angle),
+    y: tip.y - notchDepth * Math.sin(angle),
+  };
+
+  const polygonPoints = `${tip.x.toFixed(1)},${tip.y.toFixed(1)} ${leftWing.x.toFixed(1)},${leftWing.y.toFixed(1)} ${notch.x.toFixed(1)},${notch.y.toFixed(1)} ${rightWing.x.toFixed(1)},${rightWing.y.toFixed(1)}`;
+
+  return {
+    tip,
+    leftWing,
+    notch,
+    rightWing,
+    angle,
+    polygonPoints,
+  };
+}
+
+/**
+ * Returns the 8 key pickable points on a rectangular box:
+ * 4 corners (左上/右上/右下/左下角点) + 4 edge midpoints (上/右/下/左中点).
+ */
+export function getBoxCornerAndEdgePoints(box: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}): { nx: number; ny: number; x: number; y: number; isCorner: boolean; labelZh: string }[] {
+  const norms = [
+    { nx: 0, ny: 0, isCorner: true, labelZh: '左上角点' },
+    { nx: 0.5, ny: 0, isCorner: false, labelZh: '上边中点' },
+    { nx: 1, ny: 0, isCorner: true, labelZh: '右上角点' },
+    { nx: 1, ny: 0.5, isCorner: false, labelZh: '右边中点' },
+    { nx: 1, ny: 1, isCorner: true, labelZh: '右下角点' },
+    { nx: 0.5, ny: 1, isCorner: false, labelZh: '下边中点' },
+    { nx: 0, ny: 1, isCorner: true, labelZh: '左下角点' },
+    { nx: 0, ny: 0.5, isCorner: false, labelZh: '左边中点' },
+  ];
+  return norms.map((n) => ({
+    ...n,
+    x: box.x + n.nx * box.width,
+    y: box.y + n.ny * box.height,
+  }));
+}
+
+/**
+ * Snaps a world point to the perimeter of a box, prioritizing its 4 corners and 4 edge midpoints.
+ */
+export function snapPointToBoxPerimeter(
+  pt: Point,
+  box: { x: number; y: number; width: number; height: number },
+  snapRadius: number = 20
+): { nx: number; ny: number; x: number; y: number; snappedKeyPoint: boolean } {
+  const keyPts = getBoxCornerAndEdgePoints(box);
+  let bestKey = keyPts[0];
+  let bestKeyDist = Infinity;
+  for (const kp of keyPts) {
+    // Give corners a slight priority bonus so picking corners feels crisp
+    const rawDist = Math.hypot(pt.x - kp.x, pt.y - kp.y);
+    const weightedDist = kp.isCorner ? rawDist * 0.85 : rawDist;
+    if (weightedDist < bestKeyDist) {
+      bestKeyDist = weightedDist;
+      bestKey = kp;
+    }
+  }
+
+  if (Math.hypot(pt.x - bestKey.x, pt.y - bestKey.y) <= snapRadius) {
+    return {
+      nx: bestKey.nx,
+      ny: bestKey.ny,
+      x: bestKey.x,
+      y: bestKey.y,
+      snappedKeyPoint: true,
+    };
+  }
+
+  // Project onto the closest edge of the box
+  const clampedX = Math.max(box.x, Math.min(box.x + box.width, pt.x));
+  const clampedY = Math.max(box.y, Math.min(box.y + box.height, pt.y));
+  const dLeft = Math.abs(clampedX - box.x);
+  const dRight = Math.abs(box.x + box.width - clampedX);
+  const dTop = Math.abs(clampedY - box.y);
+  const dBottom = Math.abs(box.y + box.height - clampedY);
+  const minEdge = Math.min(dLeft, dRight, dTop, dBottom);
+
+  let edgeX = clampedX;
+  let edgeY = clampedY;
+  if (minEdge === dLeft) edgeX = box.x;
+  else if (minEdge === dRight) edgeX = box.x + box.width;
+  else if (minEdge === dTop) edgeY = box.y;
+  else edgeY = box.y + box.height;
+
+  const nx = Number(((edgeX - box.x) / (box.width || 1)).toFixed(3));
+  const ny = Number(((edgeY - box.y) / (box.height || 1)).toFixed(3));
+  return {
+    nx: Math.max(0, Math.min(1, nx)),
+    ny: Math.max(0, Math.min(1, ny)),
+    x: edgeX,
+    y: edgeY,
+    snappedKeyPoint: false,
+  };
+}
+
+/**
+ * Computes the geometry of a Sticky Note's Callout Leader Line (引出线),
+ * supporting corner/edge origin picking, movable/editable intermediate corner vertices (折角点),
+ * and target corner/anchor snapping.
+ */
+export function computeStickyCalloutGeometry(
+  ann: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    calloutStartNorm?: { x: number; y: number };
+    calloutElbows?: { x: number; y: number }[];
+    calloutOffsetX?: number;
+    calloutOffsetY?: number;
+  },
+  targetPointOverride?: Point
+): {
+  startPt: Point;
+  startNorm: { x: number; y: number };
+  elbowPts: Point[];
+  elbowOffsets: { x: number; y: number }[];
+  endPt: Point;
+  allPoints: Point[];
+  segmentMidpoints: { x: number; y: number; insertIndex: number }[];
+  controlPt: Point;
+  pathD: string;
+  arrowhead: {
+    tip: Point;
+    leftWing: Point;
+    notch: Point;
+    rightWing: Point;
+    angle: number;
+    polygonPoints: string;
+  };
+} {
+  const endPt: Point = targetPointOverride || {
+    x: ann.x + (ann.calloutOffsetX ?? -85),
+    y: ann.y + (ann.calloutOffsetY ?? Math.round(ann.height + 48)),
+  };
+
+  // Determine startNorm & startPt on sticky note perimeter (corners or edge midpoints)
+  let startNorm = ann.calloutStartNorm;
+  let startPt: Point;
+
+  if (startNorm) {
+    startPt = {
+      x: ann.x + startNorm.x * ann.width,
+      y: ann.y + startNorm.y * ann.height,
+    };
+  } else {
+    // Pick the closest among the 8 corners & edge midpoints toward the first bend or target
+    const refTarget =
+      ann.calloutElbows && ann.calloutElbows.length > 0
+        ? { x: ann.x + ann.calloutElbows[0].x, y: ann.y + ann.calloutElbows[0].y }
+        : endPt;
+    const keyPts = getBoxCornerAndEdgePoints(ann);
+    let best = keyPts[6]; // default bottom-left corner
+    let bestDist = Infinity;
+    for (const kp of keyPts) {
+      const d = Math.hypot(refTarget.x - kp.x, refTarget.y - kp.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = kp;
+      }
+    }
+    startNorm = { x: best.nx, y: best.ny };
+    startPt = { x: best.x, y: best.y };
+  }
+
+  // Resolve intermediate corner/elbow vertices (折角点)
+  let elbowOffsets: { x: number; y: number }[];
+  if (ann.calloutElbows !== undefined) {
+    elbowOffsets = ann.calloutElbows;
+  } else {
+    // Default 1 CAD-style elbow vertex between startPt and endPt so user can immediately see & drag the corner
+    const defaultElbowWorldX = Math.round(startPt.x + (endPt.x - startPt.x) * 0.45);
+    const defaultElbowWorldY = Math.round(endPt.y);
+    elbowOffsets = [
+      {
+        x: defaultElbowWorldX - ann.x,
+        y: defaultElbowWorldY - ann.y,
+      },
+    ];
+  }
+
+  const elbowPts: Point[] = elbowOffsets.map((off) => ({
+    x: ann.x + off.x,
+    y: ann.y + off.y,
+  }));
+
+  const allPoints: Point[] = [startPt, ...elbowPts, endPt];
+
+  const segmentMidpoints: { x: number; y: number; insertIndex: number }[] = [];
+  for (let i = 0; i < allPoints.length - 1; i++) {
+    const a = allPoints[i];
+    const b = allPoints[i + 1];
+    if (Math.hypot(b.x - a.x, b.y - a.y) >= 28) {
+      segmentMidpoints.push({
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+        insertIndex: i,
+      });
+    }
+  }
+
+  const pathD = allPoints
+    .map((pt, idx) => `${idx === 0 ? 'M' : 'L'} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`)
+    .join(' ');
+
+  const prevPt = allPoints[Math.max(0, allPoints.length - 2)];
+  const controlPt = prevPt;
+
+  const arrowhead = computeNaturalArrowhead([prevPt, endPt], 2.2, 'end') || {
+    tip: endPt,
+    leftWing: { x: endPt.x - 10, y: endPt.y - 5 },
+    notch: { x: endPt.x - 7, y: endPt.y },
+    rightWing: { x: endPt.x - 10, y: endPt.y + 5 },
+    angle: 0,
+    polygonPoints: `${endPt.x},${endPt.y} ${endPt.x - 10},${endPt.y - 5} ${endPt.x - 7},${endPt.y} ${endPt.x - 10},${endPt.y + 5}`,
+  };
+
+  return {
+    startPt,
+    startNorm,
+    elbowPts,
+    elbowOffsets,
+    endPt,
+    allPoints,
+    segmentMidpoints,
+    controlPt,
+    pathD,
+    arrowhead,
+  };
+}
+
+/**
+ * Generates crisp SVG path data for all 12 common geometric shapes so they can be rendered
+ * uniformly in Canvas.tsx, SVG export, and Canvas2D Path2D export.
+ */
+export function buildCommonShapeSvgPath(
+  shapeType: string,
+  width: number,
+  height: number,
+  strokeWidth: number = 2
+): { mainPath: string; detailPath?: string } {
+  const w = Math.max(16, width);
+  const h = Math.max(16, height);
+  const pad = Math.max(2, strokeWidth / 2 + 1);
+  const x0 = pad;
+  const y0 = pad;
+  const x1 = w - pad;
+  const y1 = h - pad;
+  const bw = Math.max(4, x1 - x0);
+  const bh = Math.max(4, y1 - y0);
+  const cx = w / 2;
+  const cy = h / 2;
+
+  switch (shapeType) {
+    case 'rect': {
+      const r = Math.min(4, bw * 0.04, bh * 0.04);
+      return {
+        mainPath: `M ${x0 + r} ${y0} H ${x1 - r} Q ${x1} ${y0} ${x1} ${y0 + r} V ${y1 - r} Q ${x1} ${y1} ${x1 - r} ${y1} H ${x0 + r} Q ${x0} ${y1} ${x0} ${y1 - r} V ${y0 + r} Q ${x0} ${y0} ${x0 + r} ${y0} Z`,
+      };
+    }
+    case 'rounded-rect': {
+      const r = Math.min(22, bw * 0.24, bh * 0.24);
+      return {
+        mainPath: `M ${x0 + r} ${y0} H ${x1 - r} Q ${x1} ${y0} ${x1} ${y0 + r} V ${y1 - r} Q ${x1} ${y1} ${x1 - r} ${y1} H ${x0 + r} Q ${x0} ${y1} ${x0} ${y1 - r} V ${y0 + r} Q ${x0} ${y0} ${x0 + r} ${y0} Z`,
+      };
+    }
+    case 'ellipse': {
+      const rx = bw / 2;
+      const ry = bh / 2;
+      return {
+        mainPath: `M ${cx - rx} ${cy} A ${rx} ${ry} 0 1 0 ${cx + rx} ${cy} A ${rx} ${ry} 0 1 0 ${cx - rx} ${cy} Z`,
+      };
+    }
+    case 'diamond': {
+      return {
+        mainPath: `M ${cx} ${y0} L ${x1} ${cy} L ${cx} ${y1} L ${x0} ${cy} Z`,
+      };
+    }
+    case 'triangle': {
+      return {
+        mainPath: `M ${cx} ${y0} L ${x1} ${y1} L ${x0} ${y1} Z`,
+      };
+    }
+    case 'parallelogram': {
+      const skew = Math.min(bw * 0.2, 28);
+      return {
+        mainPath: `M ${x0 + skew} ${y0} L ${x1} ${y0} L ${x1 - skew} ${y1} L ${x0} ${y1} Z`,
+      };
+    }
+    case 'hexagon': {
+      const inset = Math.min(bw * 0.22, 32);
+      return {
+        mainPath: `M ${x0 + inset} ${y0} L ${x1 - inset} ${y0} L ${x1} ${cy} L ${x1 - inset} ${y1} L ${x0 + inset} ${y1} L ${x0} ${cy} Z`,
+      };
+    }
+    case 'cylinder': {
+      const rx = bw / 2;
+      const ry = Math.min(18, bh * 0.16);
+      const topY = y0 + ry;
+      const botY = y1 - ry;
+      const mainPath = `M ${x0} ${topY} A ${rx} ${ry} 0 0 1 ${x1} ${topY} V ${botY} A ${rx} ${ry} 0 0 1 ${x0} ${botY} Z`;
+      const detailPath = `M ${x0} ${topY} A ${rx} ${ry} 0 0 0 ${x1} ${topY}`;
+      return { mainPath, detailPath };
+    }
+    case 'cloud': {
+      // Normalized smooth cloud contour scaled to [x0..x1, y0..y1]
+      const px = (nx: number) => (x0 + nx * bw).toFixed(1);
+      const py = (ny: number) => (y0 + ny * bh).toFixed(1);
+      return {
+        mainPath: [
+          `M ${px(0.25)} ${py(0.78)}`,
+          `C ${px(0.08)} ${py(0.78)} ${px(0.02)} ${py(0.62)} ${px(0.11)} ${py(0.48)}`,
+          `C ${px(0.07)} ${py(0.30)} ${px(0.22)} ${py(0.16)} ${px(0.38)} ${py(0.23)}`,
+          `C ${px(0.46)} ${py(0.06)} ${px(0.70)} ${py(0.08)} ${px(0.77)} ${py(0.26)}`,
+          `C ${px(0.93)} ${py(0.26)} ${px(0.99)} ${py(0.46)} ${px(0.90)} ${py(0.62)}`,
+          `C ${px(0.96)} ${py(0.74)} ${px(0.85)} ${py(0.84)} ${px(0.72)} ${py(0.80)}`,
+          `Z`,
+        ].join(' '),
+      };
+    }
+    case 'star': {
+      const outerRx = bw / 2;
+      const outerRy = bh / 2;
+      const innerRx = outerRx * 0.42;
+      const innerRy = outerRy * 0.42;
+      const pts: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+        const rx = i % 2 === 0 ? outerRx : innerRx;
+        const ry = i % 2 === 0 ? outerRy : innerRy;
+        const sx = cx + Math.cos(angle) * rx;
+        const sy = cy + Math.sin(angle) * ry;
+        pts.push(`${i === 0 ? 'M' : 'L'} ${sx.toFixed(1)} ${sy.toFixed(1)}`);
+      }
+      pts.push('Z');
+      return { mainPath: pts.join(' ') };
+    }
+    case 'callout-bubble': {
+      const r = Math.min(14, bw * 0.14, bh * 0.16);
+      const bodyBottom = y0 + bh * 0.78;
+      const tailX1 = x0 + bw * 0.22;
+      const tailTipX = x0 + bw * 0.14;
+      const tailX2 = x0 + bw * 0.38;
+      return {
+        mainPath: [
+          `M ${x0 + r} ${y0}`,
+          `H ${x1 - r}`,
+          `Q ${x1} ${y0} ${x1} ${y0 + r}`,
+          `V ${bodyBottom - r}`,
+          `Q ${x1} ${bodyBottom} ${x1 - r} ${bodyBottom}`,
+          `H ${tailX2}`,
+          `L ${tailTipX} ${y1}`,
+          `L ${tailX1} ${bodyBottom}`,
+          `H ${x0 + r}`,
+          `Q ${x0} ${bodyBottom} ${x0} ${bodyBottom - r}`,
+          `V ${y0 + r}`,
+          `Q ${x0} ${y0} ${x0 + r} ${y0}`,
+          `Z`,
+        ].join(' '),
+      };
+    }
+    case 'arrow-block': {
+      const shaftTop = y0 + bh * 0.26;
+      const shaftBot = y0 + bh * 0.74;
+      const headX = x0 + bw * 0.64;
+      return {
+        mainPath: `M ${x0} ${shaftTop} L ${headX} ${shaftTop} L ${headX} ${y0} L ${x1} ${cy} L ${headX} ${y1} L ${headX} ${shaftBot} L ${x0} ${shaftBot} Z`,
+      };
+    }
+    default: {
+      return {
+        mainPath: `M ${x0} ${y0} H ${x1} V ${y1} H ${x0} Z`,
+      };
+    }
+  }
 }
 
 

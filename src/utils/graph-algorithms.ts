@@ -1037,6 +1037,315 @@ export type AlignmentType =
   | 'distribute-h'
   | 'distribute-v';
 
+export interface AlignableElementBox {
+  kind: 'person' | 'frame' | 'annotation';
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SmartGuideLine {
+  orientation: 'vertical' | 'horizontal';
+  pos: number;
+  start: number;
+  end: number;
+  snapType: 'edge' | 'center';
+  anchorPoints: { x: number; y: number }[];
+}
+
+export interface SmartSnapResult {
+  snappedDeltaX: number;
+  snappedDeltaY: number;
+  guides: SmartGuideLine[];
+}
+
+/**
+ * Align or distribute a heterogeneous set of canvas elements (Person cards, Shapes, Sticky notes, Text boxes, GroupFrames)
+ * using their true bounding boxes (x, y, width, height).
+ */
+export function alignUnifiedElements(
+  elements: AlignableElementBox[],
+  alignment: AlignmentType
+): AlignableElementBox[] {
+  if (elements.length < 2) {
+    return elements.map((el) => ({ ...el }));
+  }
+
+  const minLeft = Math.min(...elements.map((el) => el.x));
+  const maxRight = Math.max(...elements.map((el) => el.x + el.width));
+  const minTop = Math.min(...elements.map((el) => el.y));
+  const maxBottom = Math.max(...elements.map((el) => el.y + el.height));
+
+  const unionCenterX = (minLeft + maxRight) / 2;
+  const unionCenterY = (minTop + maxBottom) / 2;
+
+  switch (alignment) {
+    case 'left':
+      return elements.map((el) => ({
+        ...el,
+        x: Math.round(minLeft),
+      }));
+
+    case 'center-h':
+      return elements.map((el) => ({
+        ...el,
+        x: Math.round(unionCenterX - el.width / 2),
+      }));
+
+    case 'right':
+      return elements.map((el) => ({
+        ...el,
+        x: Math.round(maxRight - el.width),
+      }));
+
+    case 'top':
+      return elements.map((el) => ({
+        ...el,
+        y: Math.round(minTop),
+      }));
+
+    case 'center-v':
+      return elements.map((el) => ({
+        ...el,
+        y: Math.round(unionCenterY - el.height / 2),
+      }));
+
+    case 'bottom':
+      return elements.map((el) => ({
+        ...el,
+        y: Math.round(maxBottom - el.height),
+      }));
+
+    case 'distribute-h': {
+      const sorted = [...elements].sort(
+        (a, b) => a.x + a.width / 2 - (b.x + b.width / 2)
+      );
+      const totalWidths = sorted.reduce((sum, el) => sum + el.width, 0);
+      const totalSpan = maxRight - minLeft;
+      const rawGap =
+        sorted.length > 1 ? (totalSpan - totalWidths) / (sorted.length - 1) : 0;
+      const netGap = Math.max(24, rawGap);
+
+      let cursorX = minLeft;
+      const posMap = new Map<string, number>();
+      sorted.forEach((el) => {
+        posMap.set(`${el.kind}:${el.id}`, Math.round(cursorX));
+        cursorX += el.width + netGap;
+      });
+
+      return elements.map((el) => ({
+        ...el,
+        x: posMap.get(`${el.kind}:${el.id}`) ?? el.x,
+      }));
+    }
+
+    case 'distribute-v': {
+      const sorted = [...elements].sort(
+        (a, b) => a.y + a.height / 2 - (b.y + b.height / 2)
+      );
+      const totalHeights = sorted.reduce((sum, el) => sum + el.height, 0);
+      const totalSpan = maxBottom - minTop;
+      const rawGap =
+        sorted.length > 1 ? (totalSpan - totalHeights) / (sorted.length - 1) : 0;
+      const netGap = Math.max(24, rawGap);
+
+      let cursorY = minTop;
+      const posMap = new Map<string, number>();
+      sorted.forEach((el) => {
+        posMap.set(`${el.kind}:${el.id}`, Math.round(cursorY));
+        cursorY += el.height + netGap;
+      });
+
+      return elements.map((el) => ({
+        ...el,
+        y: posMap.get(`${el.kind}:${el.id}`) ?? el.y,
+      }));
+    }
+  }
+}
+
+/**
+ * Computes real-time magnetic Smart Alignment Guides (left/center/right & top/middle/bottom)
+ * when dragging one or more elements across the canvas.
+ */
+export function computeSmartSnapGuides(
+  movingBox: Rect,
+  staticBoxes: Rect[],
+  threshold: number = 6
+): SmartSnapResult {
+  if (staticBoxes.length === 0) {
+    return { snappedDeltaX: 0, snappedDeltaY: 0, guides: [] };
+  }
+
+  // Spatial bounding-box pre-filtering: only consider static boxes within a reasonable neighborhood
+  // along the perpendicular axis (avoids O(N) inner-loop checks on distant off-screen nodes when N > 100)
+  const MAX_NEIGHBOR_SPAN = 2200;
+  const moveCenterX = movingBox.x + movingBox.width / 2;
+  const moveCenterY = movingBox.y + movingBox.height / 2;
+
+  const xCandidates =
+    staticBoxes.length > 40
+      ? staticBoxes.filter(
+          (s) => Math.abs(s.y + s.height / 2 - moveCenterY) <= MAX_NEIGHBOR_SPAN
+        )
+      : staticBoxes;
+
+  const yCandidates =
+    staticBoxes.length > 40
+      ? staticBoxes.filter(
+          (s) => Math.abs(s.x + s.width / 2 - moveCenterX) <= MAX_NEIGHBOR_SPAN
+        )
+      : staticBoxes;
+
+  const mXPoints: { val: number; type: 'edge' | 'center' }[] = [
+    { val: movingBox.x + movingBox.width / 2, type: 'center' },
+    { val: movingBox.x, type: 'edge' },
+    { val: movingBox.x + movingBox.width, type: 'edge' },
+  ];
+
+  const mYPoints: { val: number; type: 'edge' | 'center' }[] = [
+    { val: movingBox.y + movingBox.height / 2, type: 'center' },
+    { val: movingBox.y, type: 'edge' },
+    { val: movingBox.y + movingBox.height, type: 'edge' },
+  ];
+
+  let bestDiffX = threshold + 0.001;
+  let snappedDeltaX = 0;
+
+  for (const sBox of xCandidates) {
+    const sXPoints = [
+      sBox.x + sBox.width / 2,
+      sBox.x,
+      sBox.x + sBox.width,
+    ];
+    for (const mPt of mXPoints) {
+      for (const sVal of sXPoints) {
+        const diff = Math.abs(sVal - mPt.val);
+        // Give center-to-center alignment a tiny priority tie-breaker
+        const weightedDiff = mPt.type === 'center' ? diff - 0.05 : diff;
+        if (diff <= threshold && weightedDiff < bestDiffX) {
+          bestDiffX = weightedDiff;
+          snappedDeltaX = sVal - mPt.val;
+        }
+      }
+    }
+  }
+
+  let bestDiffY = threshold + 0.001;
+  let snappedDeltaY = 0;
+
+  for (const sBox of yCandidates) {
+    const sYPoints = [
+      sBox.y + sBox.height / 2,
+      sBox.y,
+      sBox.y + sBox.height,
+    ];
+    for (const mPt of mYPoints) {
+      for (const sVal of sYPoints) {
+        const diff = Math.abs(sVal - mPt.val);
+        const weightedDiff = mPt.type === 'center' ? diff - 0.05 : diff;
+        if (diff <= threshold && weightedDiff < bestDiffY) {
+          bestDiffY = weightedDiff;
+          snappedDeltaY = sVal - mPt.val;
+        }
+      }
+    }
+  }
+
+  const finalMovingBox: Rect = {
+    x: movingBox.x + snappedDeltaX,
+    y: movingBox.y + snappedDeltaY,
+    width: movingBox.width,
+    height: movingBox.height,
+  };
+
+  const guides: SmartGuideLine[] = [];
+  const EPS = 0.75;
+
+  // Build active vertical guide lines if X snapped
+  if (bestDiffX <= threshold) {
+    const finalMX: { val: number; type: 'edge' | 'center' }[] = [
+      { val: finalMovingBox.x + finalMovingBox.width / 2, type: 'center' },
+      { val: finalMovingBox.x, type: 'edge' },
+      { val: finalMovingBox.x + finalMovingBox.width, type: 'edge' },
+    ];
+
+    for (const mLine of finalMX) {
+      const matchedStatic: Rect[] = [];
+      for (const sBox of staticBoxes) {
+        const sLines = [sBox.x, sBox.x + sBox.width / 2, sBox.x + sBox.width];
+        if (sLines.some((sVal) => Math.abs(sVal - mLine.val) <= EPS)) {
+          matchedStatic.push(sBox);
+        }
+      }
+      if (matchedStatic.length > 0) {
+        const allBoxes = [finalMovingBox, ...matchedStatic];
+        const minY = Math.min(...allBoxes.map((b) => b.y)) - 14;
+        const maxY = Math.max(...allBoxes.map((b) => b.y + b.height)) + 14;
+        const anchorPoints = allBoxes.map((b) => ({
+          x: mLine.val,
+          y: b.y + b.height / 2,
+        }));
+        guides.push({
+          orientation: 'vertical',
+          pos: mLine.val,
+          start: minY,
+          end: maxY,
+          snapType: mLine.type,
+          anchorPoints,
+        });
+        // Keep at most 1 primary vertical line if center is already matched to avoid visual clutter on equal-width cards
+        if (mLine.type === 'center') break;
+      }
+    }
+  }
+
+  // Build active horizontal guide lines if Y snapped
+  if (bestDiffY <= threshold) {
+    const finalMY: { val: number; type: 'edge' | 'center' }[] = [
+      { val: finalMovingBox.y + finalMovingBox.height / 2, type: 'center' },
+      { val: finalMovingBox.y, type: 'edge' },
+      { val: finalMovingBox.y + finalMovingBox.height, type: 'edge' },
+    ];
+
+    for (const mLine of finalMY) {
+      const matchedStatic: Rect[] = [];
+      for (const sBox of staticBoxes) {
+        const sLines = [sBox.y, sBox.y + sBox.height / 2, sBox.y + sBox.height];
+        if (sLines.some((sVal) => Math.abs(sVal - mLine.val) <= EPS)) {
+          matchedStatic.push(sBox);
+        }
+      }
+      if (matchedStatic.length > 0) {
+        const allBoxes = [finalMovingBox, ...matchedStatic];
+        const minX = Math.min(...allBoxes.map((b) => b.x)) - 14;
+        const maxX = Math.max(...allBoxes.map((b) => b.x + b.width)) + 14;
+        const anchorPoints = allBoxes.map((b) => ({
+          x: b.x + b.width / 2,
+          y: mLine.val,
+        }));
+        guides.push({
+          orientation: 'horizontal',
+          pos: mLine.val,
+          start: minX,
+          end: maxX,
+          snapType: mLine.type,
+          anchorPoints,
+        });
+        if (mLine.type === 'center') break;
+      }
+    }
+  }
+
+  return {
+    snappedDeltaX,
+    snappedDeltaY,
+    guides,
+  };
+}
+
 /**
  * Align or distribute a set of selected Person cards with generous non-overlapping spacing
  */
@@ -1044,53 +1353,14 @@ export function alignSelectedPeople(
   selectedPeople: BasePerson[],
   alignment: AlignmentType
 ): GraphNodePosition[] {
-  if (selectedPeople.length < 2) {
-    return selectedPeople.map((p) => ({ id: p.id, x: p.x, y: p.y }));
-  }
-
-  const minX = Math.min(...selectedPeople.map((p) => p.x));
-  const maxX = Math.max(...selectedPeople.map((p) => p.x));
-  const minY = Math.min(...selectedPeople.map((p) => p.y));
-  const maxY = Math.max(...selectedPeople.map((p) => p.y));
-  const avgX = Math.round((minX + maxX) / 2);
-  const avgY = Math.round((minY + maxY) / 2);
-
-  switch (alignment) {
-    case 'left':
-      return selectedPeople.map((p) => ({ id: p.id, x: minX, y: p.y }));
-    case 'center-h':
-      return selectedPeople.map((p) => ({ id: p.id, x: avgX, y: p.y }));
-    case 'right':
-      return selectedPeople.map((p) => ({ id: p.id, x: maxX, y: p.y }));
-    case 'top':
-      return selectedPeople.map((p) => ({ id: p.id, x: p.x, y: minY }));
-    case 'center-v':
-      return selectedPeople.map((p) => ({ id: p.id, x: p.x, y: avgY }));
-    case 'bottom':
-      return selectedPeople.map((p) => ({ id: p.id, x: p.x, y: maxY }));
-    case 'distribute-h': {
-      const sorted = [...selectedPeople].sort((a, b) => a.x - b.x);
-      const step =
-        sorted.length > 1
-          ? Math.max(CARD_WIDTH + 64, (maxX - minX) / (sorted.length - 1))
-          : 0;
-      return sorted.map((p, idx) => ({
-        id: p.id,
-        x: Math.round(minX + idx * step),
-        y: p.y,
-      }));
-    }
-    case 'distribute-v': {
-      const sorted = [...selectedPeople].sort((a, b) => a.y - b.y);
-      const step =
-        sorted.length > 1
-          ? Math.max(CARD_HEIGHT + 64, (maxY - minY) / (sorted.length - 1))
-          : 0;
-      return sorted.map((p, idx) => ({
-        id: p.id,
-        x: p.x,
-        y: Math.round(minY + idx * step),
-      }));
-    }
-  }
+  const boxes: AlignableElementBox[] = selectedPeople.map((p) => ({
+    kind: 'person',
+    id: p.id,
+    x: p.x,
+    y: p.y,
+    width: CARD_WIDTH,
+    height: CARD_HEIGHT,
+  }));
+  const aligned = alignUnifiedElements(boxes, alignment);
+  return aligned.map((b) => ({ id: b.id, x: b.x, y: b.y }));
 }

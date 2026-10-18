@@ -10,6 +10,8 @@ import {
   ProjectMap,
   LayerAction,
   CanvasAnnotation,
+  ProjectSnapshot,
+  CameraBookmark,
 } from './types/crm.ts';
 import {
   loadProjects,
@@ -30,6 +32,10 @@ import {
   saveSidebarCollapsed,
   loadSavedStylePreferences,
   saveStylePreferences,
+  loadProjectSnapshots,
+  saveProjectSnapshots,
+  loadCameraBookmarks,
+  saveCameraBookmarks,
   syncFromSqlite,
 } from './utils/storage.ts';
 import {
@@ -43,16 +49,29 @@ import {
   calculateFactionLayoutFull,
   calculateHierarchyLayoutFull,
   alignSelectedPeople,
+  alignUnifiedElements,
+  AlignableElementBox,
   AlignmentType,
 } from './utils/graph-algorithms.ts';
 import { CARD_WIDTH, CARD_HEIGHT } from './utils/graph-math.ts';
 import { downloadRelationshipsCsv } from './utils/csv-export.ts';
-import { BackgroundStyleId, LineStyleId, CardStyleId } from './types/styles.ts';
+import {
+  BackgroundStyleId,
+  LineStyleId,
+  CardStyleId,
+  BackgroundStyleConfig,
+  LineStyleConfig,
+  CardStyleConfig,
+  SavedCustomStyleScheme,
+} from './types/styles.ts';
 import {
   CuratedThemeBundle,
   BACKGROUND_STYLES,
   LINE_STYLES,
   CARD_STYLES,
+  DEFAULT_CUSTOM_BG,
+  DEFAULT_CUSTOM_LINE,
+  DEFAULT_CUSTOM_CARD,
 } from './utils/theme-presets.ts';
 
 import { TopNav } from './components/TopNav.tsx';
@@ -65,11 +84,12 @@ import { GroupFrameModal } from './components/GroupFrameModal.tsx';
 import { OcrModal } from './components/OcrModal.tsx';
 import { QuickHelpModal } from './components/QuickHelpModal.tsx';
 import { ConfirmModal } from './components/ConfirmModal.tsx';
-import { InfluencePathModal } from './components/InfluencePathModal.tsx';
+import { SnapshotDiffDrawer } from './components/SnapshotDiffDrawer.tsx';
 import { TimelineDrawer } from './components/TimelineDrawer.tsx';
 import { StyleCenterModal } from './components/StyleCenterModal.tsx';
 import { ExportModal } from './components/ExportModal.tsx';
 import { LayerItemKind } from './components/LayerManagerPanel.tsx';
+import { computeSnapshotDiff } from './utils/snapshot-diff.ts';
 
 interface HistorySnapshot {
   people: Person[];
@@ -123,9 +143,8 @@ export default function App() {
   const [history, setHistory] = useState<HistorySnapshot[]>([]);
   const [future, setFuture] = useState<HistorySnapshot[]>([]);
 
-  // Focus Mode & Influence Path Highlighting
+  // Focus Mode
   const [focusedPersonId, setFocusedPersonId] = useState<string | null>(null);
-  const [highlightedPathIds, setHighlightedPathIds] = useState<string[] | null>(null);
 
   // Modals & Drawers
   const [isPersonModalOpen, setIsPersonModalOpen] = useState(false);
@@ -144,25 +163,63 @@ export default function App() {
 
   const [isQuickHelpOpen, setIsQuickHelpOpen] = useState(false);
   const [isConfirmSampleOpen, setIsConfirmSampleOpen] = useState(false);
-  const [isInfluencePathOpen, setIsInfluencePathOpen] = useState(false);
-  const [influencePathTargetId, setInfluencePathTargetId] = useState<string | null>(null);
+
+  // Module 1.3: Timeline & Snapshot Diff State
+  const [isSnapshotDrawerOpen, setIsSnapshotDrawerOpen] = useState(false);
+  const [projectSnapshots, setProjectSnapshots] = useState<ProjectSnapshot[]>(() =>
+    loadProjectSnapshots(activeProjectId)
+  );
+  const [activeSnapshotDiffId, setActiveSnapshotDiffId] = useState<string | null>(null);
+
+  // Module 2.3: Presentation & Spotlight Mode State
+  const [isPresentationMode, setIsPresentationMode] = useState(false);
+  const [cameraBookmarks, setCameraBookmarks] = useState<CameraBookmark[]>(() =>
+    loadCameraBookmarks(activeProjectId)
+  );
+
   const [timelinePerson, setTimelinePerson] = useState<Person | null>(null);
   const [isStyleCenterOpen, setIsStyleCenterOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
 
+  const activeSnapshotDiffResult = React.useMemo(() => {
+    if (!activeSnapshotDiffId) return null;
+    const baseSnap = projectSnapshots.find((s) => s.id === activeSnapshotDiffId);
+    if (!baseSnap) return null;
+    return computeSnapshotDiff(baseSnap, {
+      people,
+      relationships,
+      frames: groupFrames,
+      annotations,
+    });
+  }, [activeSnapshotDiffId, projectSnapshots, people, relationships, groupFrames, annotations]);
+
+  const activeSnapshotTitle = React.useMemo(() => {
+    if (!activeSnapshotDiffId) return null;
+    return projectSnapshots.find((s) => s.id === activeSnapshotDiffId)?.title || null;
+  }, [activeSnapshotDiffId, projectSnapshots]);
+
   const [stylePrefs, setStylePrefs] = useState(() => loadSavedStylePreferences());
 
   const activeBgConfig = React.useMemo(() => {
+    if (stylePrefs.bgStyleId === 'custom-bg') {
+      return stylePrefs.customBgConfig || DEFAULT_CUSTOM_BG;
+    }
     return BACKGROUND_STYLES.find((b) => b.id === stylePrefs.bgStyleId) || BACKGROUND_STYLES[0];
-  }, [stylePrefs.bgStyleId]);
+  }, [stylePrefs.bgStyleId, stylePrefs.customBgConfig]);
 
   const activeLineConfig = React.useMemo(() => {
+    if (stylePrefs.lineStyleId === 'custom-line') {
+      return stylePrefs.customLineConfig || DEFAULT_CUSTOM_LINE;
+    }
     return LINE_STYLES.find((l) => l.id === stylePrefs.lineStyleId) || LINE_STYLES[0];
-  }, [stylePrefs.lineStyleId]);
+  }, [stylePrefs.lineStyleId, stylePrefs.customLineConfig]);
 
   const activeCardConfig = React.useMemo(() => {
+    if (stylePrefs.cardStyleId === 'custom-card') {
+      return stylePrefs.customCardConfig || DEFAULT_CUSTOM_CARD;
+    }
     return CARD_STYLES.find((c) => c.id === stylePrefs.cardStyleId) || CARD_STYLES[0];
-  }, [stylePrefs.cardStyleId]);
+  }, [stylePrefs.cardStyleId, stylePrefs.customCardConfig]);
 
   // Helper to push history
   const recordHistory = useCallback(() => {
@@ -225,6 +282,7 @@ export default function App() {
         setGroupFrames(loadSavedGroupFrames(activeProjectId));
         setVisits(loadSavedVisitRecords(activeProjectId));
         setAnnotations(loadSavedAnnotations(activeProjectId));
+        setStylePrefs(loadSavedStylePreferences());
       }
     });
   }, [activeProjectId]);
@@ -262,6 +320,14 @@ export default function App() {
     saveStylePreferences(stylePrefs);
   }, [stylePrefs]);
 
+  useEffect(() => {
+    saveProjectSnapshots(projectSnapshots, activeProjectId);
+  }, [projectSnapshots, activeProjectId]);
+
+  useEffect(() => {
+    saveCameraBookmarks(cameraBookmarks, activeProjectId);
+  }, [cameraBookmarks, activeProjectId]);
+
   // Switch Data Center Project
   const handleSelectProject = (projectId: string) => {
     if (projectId === activeProjectId) return;
@@ -272,16 +338,162 @@ export default function App() {
     setGroupFrames(loadSavedGroupFrames(projectId));
     setVisits(loadSavedVisitRecords(projectId));
     setAnnotations(loadSavedAnnotations(projectId));
+    setProjectSnapshots(loadProjectSnapshots(projectId));
+    setCameraBookmarks(loadCameraBookmarks(projectId));
     setHistory([]);
     setFuture([]);
     setFocusedPersonId(null);
-    setHighlightedPathIds(null);
+    setActiveSnapshotDiffId(null);
     setTimelinePerson(null);
     setFitViewTrigger((prev) => prev + 1);
     const targetProj = projects.find((p) => p.id === projectId);
     if (targetProj) {
       showToast(`已切换至项目：${targetProj.name}`);
     }
+  };
+
+  // Module 1.3: Snapshot Handlers
+  const handleCreateSnapshot = (title: string, note?: string) => {
+    const newSnap: ProjectSnapshot = {
+      id: `snap-${Date.now()}`,
+      projectId: activeProjectId,
+      title,
+      note,
+      createdAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+      people: JSON.parse(JSON.stringify(people)),
+      relationships: JSON.parse(JSON.stringify(relationships)),
+      frames: JSON.parse(JSON.stringify(groupFrames)),
+      annotations: JSON.parse(JSON.stringify(annotations)),
+    };
+    setProjectSnapshots((prev) => [newSnap, ...prev]);
+    setActiveSnapshotDiffId(newSnap.id);
+    showToast(`已保存历史快照：「${title}」`);
+  };
+
+  const handleDeleteSnapshot = (snapshotId: string) => {
+    setProjectSnapshots((prev) => prev.filter((s) => s.id !== snapshotId));
+    if (activeSnapshotDiffId === snapshotId) {
+      setActiveSnapshotDiffId(null);
+    }
+    showToast('已删除该历史快照');
+  };
+
+  const handleRestoreSnapshot = (snapshot: ProjectSnapshot) => {
+    recordHistory();
+    setPeople(JSON.parse(JSON.stringify(snapshot.people)));
+    setRelationships(JSON.parse(JSON.stringify(snapshot.relationships)));
+    setGroupFrames(JSON.parse(JSON.stringify(snapshot.frames || [])));
+    if (snapshot.annotations) {
+      setAnnotations(JSON.parse(JSON.stringify(snapshot.annotations)));
+    }
+    setActiveSnapshotDiffId(null);
+    setIsSnapshotDrawerOpen(false);
+    showToast(`已回滚画布至历史快照：「${snapshot.title}」`);
+  };
+
+  // Module 2.2: Group / Ungroup / Lock Selected Elements
+  const handleGroupSelectedElements = (
+    personIds: string[],
+    frameIds: string[],
+    annotationIds: string[]
+  ) => {
+    if (personIds.length + frameIds.length + annotationIds.length < 2) return;
+    recordHistory();
+    const newGroupId = `grp-${Date.now()}`;
+    const pSet = new Set(personIds);
+    const fSet = new Set(frameIds);
+    const aSet = new Set(annotationIds);
+    if (pSet.size > 0) {
+      setPeople((prev) =>
+        prev.map((p) => (pSet.has(p.id) ? { ...p, groupId: newGroupId } : p))
+      );
+    }
+    if (fSet.size > 0) {
+      setGroupFrames((prev) =>
+        prev.map((f) => (fSet.has(f.id) ? { ...f, groupId: newGroupId } : f))
+      );
+    }
+    if (aSet.size > 0) {
+      setAnnotations((prev) =>
+        prev.map((a) => (aSet.has(a.id) ? { ...a, groupId: newGroupId } : a))
+      );
+    }
+    showToast(
+      `已将 ${personIds.length + frameIds.length + annotationIds.length} 个元素设为组合 (Ctrl+G)`
+    );
+  };
+
+  const handleUngroupSelectedElements = (
+    personIds: string[],
+    frameIds: string[],
+    annotationIds: string[]
+  ) => {
+    recordHistory();
+    const pSet = new Set(personIds);
+    const fSet = new Set(frameIds);
+    const aSet = new Set(annotationIds);
+    setPeople((prev) =>
+      prev.map((p) => (pSet.has(p.id) ? { ...p, groupId: undefined } : p))
+    );
+    setGroupFrames((prev) =>
+      prev.map((f) => (fSet.has(f.id) ? { ...f, groupId: undefined } : f))
+    );
+    setAnnotations((prev) =>
+      prev.map((a) => (aSet.has(a.id) ? { ...a, groupId: undefined } : a))
+    );
+    showToast('已解除组合编组 (Ctrl+Shift+G)');
+  };
+
+  const handleToggleLockSelectedElements = (
+    personIds: string[],
+    frameIds: string[],
+    annotationIds: string[]
+  ) => {
+    recordHistory();
+    const pSet = new Set(personIds);
+    const fSet = new Set(frameIds);
+    const aSet = new Set(annotationIds);
+
+    const anyUnlocked =
+      people.some((p) => pSet.has(p.id) && !p.locked) ||
+      groupFrames.some((f) => fSet.has(f.id) && !f.locked) ||
+      annotations.some((a) => aSet.has(a.id) && !a.locked);
+    const nextLocked = anyUnlocked;
+
+    if (pSet.size > 0) {
+      setPeople((prev) =>
+        prev.map((p) => (pSet.has(p.id) ? { ...p, locked: nextLocked } : p))
+      );
+    }
+    if (fSet.size > 0) {
+      setGroupFrames((prev) =>
+        prev.map((f) => (fSet.has(f.id) ? { ...f, locked: nextLocked } : f))
+      );
+    }
+    if (aSet.size > 0) {
+      setAnnotations((prev) =>
+        prev.map((a) => (aSet.has(a.id) ? { ...a, locked: nextLocked } : a))
+      );
+    }
+    showToast(nextLocked ? '已锁定选中元素 (普通框选将自动忽略)' : '已解锁选中元素');
+  };
+
+  // Module 2.3: Camera Bookmark Handlers
+  const handleAddCameraBookmark = (title: string, panX: number, panY: number, zoom: number) => {
+    const newBm: CameraBookmark = {
+      id: `bm-${Date.now()}`,
+      title,
+      panX,
+      panY,
+      zoom,
+    };
+    setCameraBookmarks((prev) => [...prev, newBm]);
+    showToast(`已保存汇报镜头书签：「${title}」`);
+  };
+
+  const handleDeleteCameraBookmark = (id: string) => {
+    setCameraBookmarks((prev) => prev.filter((b) => b.id !== id));
+    showToast('已删除汇报书签');
   };
 
   // Create New Project from Dashboard
@@ -404,7 +616,7 @@ export default function App() {
     showToast('项目已删除');
   };
 
-  // Style Selection Handlers
+  // Style Selection & Custom Designer Handlers
   const handleSelectBgStyle = (id: BackgroundStyleId) => {
     setStylePrefs((prev) => ({ ...prev, bgStyleId: id }));
   };
@@ -414,19 +626,81 @@ export default function App() {
   const handleSelectCardStyle = (id: CardStyleId) => {
     setStylePrefs((prev) => ({ ...prev, cardStyleId: id }));
   };
+  const handleApplyCustomBg = (config: BackgroundStyleConfig) => {
+    setStylePrefs((prev) => ({
+      ...prev,
+      bgStyleId: 'custom-bg',
+      customBgConfig: config,
+    }));
+    showToast('已应用自定义画布背景');
+  };
+  const handleApplyCustomLine = (config: LineStyleConfig) => {
+    setStylePrefs((prev) => ({
+      ...prev,
+      lineStyleId: 'custom-line',
+      customLineConfig: config,
+    }));
+    showToast('已应用自定义连线样式');
+  };
+  const handleApplyCustomCard = (config: CardStyleConfig) => {
+    setStylePrefs((prev) => ({
+      ...prev,
+      cardStyleId: 'custom-card',
+      customCardConfig: config,
+    }));
+    showToast('已应用自定义节点卡片样式');
+  };
+  const handleSaveCustomScheme = (scheme: SavedCustomStyleScheme) => {
+    setStylePrefs((prev) => ({
+      ...prev,
+      bgStyleId: 'custom-bg',
+      lineStyleId: 'custom-line',
+      cardStyleId: 'custom-card',
+      customBgConfig: scheme.bgConfig,
+      customLineConfig: scheme.lineConfig,
+      customCardConfig: scheme.cardConfig,
+      savedCustomSchemes: [
+        scheme,
+        ...(prev.savedCustomSchemes || []).filter((s) => s.id !== scheme.id),
+      ],
+    }));
+    showToast(`已保存并应用自定义方案：${scheme.name}`);
+  };
+  const handleApplyCustomScheme = (scheme: SavedCustomStyleScheme) => {
+    setStylePrefs((prev) => ({
+      ...prev,
+      bgStyleId: 'custom-bg',
+      lineStyleId: 'custom-line',
+      cardStyleId: 'custom-card',
+      customBgConfig: scheme.bgConfig,
+      customLineConfig: scheme.lineConfig,
+      customCardConfig: scheme.cardConfig,
+    }));
+    showToast(`已切换至方案：${scheme.name}`);
+  };
+  const handleDeleteCustomScheme = (id: string) => {
+    setStylePrefs((prev) => ({
+      ...prev,
+      savedCustomSchemes: (prev.savedCustomSchemes || []).filter((s) => s.id !== id),
+    }));
+    showToast('已删除自定义方案');
+  };
   const handleApplyBundle = (bundle: CuratedThemeBundle) => {
-    setStylePrefs({
+    setStylePrefs((prev) => ({
+      ...prev,
       bgStyleId: bundle.bgId,
       lineStyleId: bundle.lineId,
       cardStyleId: bundle.cardId,
-    });
+    }));
   };
   const handleResetDefaults = () => {
-    setStylePrefs({
+    setStylePrefs((prev) => ({
+      ...prev,
       bgStyleId: 'grid-dots-slate',
       lineStyleId: 'bezier-smooth',
       cardStyleId: 'classic-white',
-    });
+    }));
+    showToast('已恢复默认样式');
   };
 
   // Visit Records Handlers
@@ -683,7 +957,7 @@ export default function App() {
     if (personIds.length < 2) return;
     recordHistory();
     const idSet = new Set(personIds);
-    const targetPeople = people.filter((p) => idSet.has(p.id));
+    const targetPeople = people.filter((p) => idSet.has(p.id) && !p.locked);
     const aligned = alignSelectedPeople(targetPeople, alignment);
     const posMap = new Map(aligned.map((a) => [a.id, a]));
     setPeople((prev) =>
@@ -692,6 +966,102 @@ export default function App() {
         return nextPos ? { ...p, x: nextPos.x, y: nextPos.y, updatedAt: Date.now() } : p;
       })
     );
+    showToast('已完成批量对齐排版');
+  };
+
+  const handleAlignElements = (
+    personIds: string[],
+    frameIds: string[],
+    annotationIds: string[],
+    alignment: AlignmentType
+  ) => {
+    const pSet = new Set(personIds);
+    const fSet = new Set(frameIds);
+    const aSet = new Set(annotationIds);
+
+    const boxes: AlignableElementBox[] = [];
+
+    people.forEach((p) => {
+      if (pSet.has(p.id) && !p.locked) {
+        boxes.push({
+          kind: 'person',
+          id: p.id,
+          x: p.x,
+          y: p.y,
+          width: CARD_WIDTH,
+          height: CARD_HEIGHT,
+        });
+      }
+    });
+
+    groupFrames.forEach((f) => {
+      if (fSet.has(f.id) && !f.locked) {
+        boxes.push({
+          kind: 'frame',
+          id: f.id,
+          x: f.x,
+          y: f.y,
+          width: f.width,
+          height: f.height,
+        });
+      }
+    });
+
+    annotations.forEach((a) => {
+      if (aSet.has(a.id) && !a.locked) {
+        boxes.push({
+          kind: 'annotation',
+          id: a.id,
+          x: a.x,
+          y: a.y,
+          width: a.width,
+          height: a.height,
+        });
+      }
+    });
+
+    if (boxes.length < 2) return;
+
+    recordHistory();
+    const aligned = alignUnifiedElements(boxes, alignment);
+
+    const pMoveMap = new Map<string, { x: number; y: number }>();
+    const fMoveMap = new Map<string, { x: number; y: number }>();
+    const aMoveMap = new Map<string, { x: number; y: number }>();
+
+    aligned.forEach((item) => {
+      if (item.kind === 'person') pMoveMap.set(item.id, { x: item.x, y: item.y });
+      else if (item.kind === 'frame') fMoveMap.set(item.id, { x: item.x, y: item.y });
+      else if (item.kind === 'annotation') aMoveMap.set(item.id, { x: item.x, y: item.y });
+    });
+
+    if (pMoveMap.size > 0) {
+      setPeople((prev) =>
+        prev.map((p) => {
+          const next = pMoveMap.get(p.id);
+          return next ? { ...p, x: next.x, y: next.y, updatedAt: Date.now() } : p;
+        })
+      );
+    }
+
+    if (fMoveMap.size > 0) {
+      setGroupFrames((prev) =>
+        prev.map((f) => {
+          const next = fMoveMap.get(f.id);
+          return next ? { ...f, x: next.x, y: next.y } : f;
+        })
+      );
+    }
+
+    if (aMoveMap.size > 0) {
+      setAnnotations((prev) =>
+        prev.map((a) => {
+          const next = aMoveMap.get(a.id);
+          return next ? { ...a, x: next.x, y: next.y, updatedAt: Date.now() } : a;
+        })
+      );
+    }
+
     showToast('已完成批量对齐排版');
   };
 
@@ -1141,57 +1511,58 @@ export default function App() {
         </div>
       )}
 
-      {/* Top Navigation & Data Center Project Engineering Bar */}
-      <TopNav
-        activeView={activeView}
-        onChangeView={(v) => setActiveView(v)}
-        projects={projects}
-        activeProject={activeProject}
-        onSelectProject={handleSelectProject}
-        sidebarCollapsed={sidebarCollapsed}
-        onToggleSidebar={() => setSidebarCollapsed((prev) => !prev)}
-        isLayerPanelOpen={isLayerPanelOpen}
-        onToggleLayerPanel={() => setIsLayerPanelOpen((prev) => !prev)}
-        focusedPersonName={
-          focusedPerson
-            ? focusedPerson.name
-            : highlightedPathIds
-            ? `突破路径 (${highlightedPathIds.length} 节点)`
-            : null
-        }
-        onClearFocus={() => {
-          setFocusedPersonId(null);
-          setHighlightedPathIds(null);
-        }}
-        canUndo={history.length > 0}
-        canRedo={future.length > 0}
-        onUndo={handleUndo}
-        onRedo={handleRedo}
-        onAutoLayoutFaction={handleAutoLayoutFaction}
-        onAutoLayoutHierarchy={handleAutoLayoutHierarchy}
-        onOpenInfluencePath={() => {
-          setInfluencePathTargetId(null);
-          setIsInfluencePathOpen(true);
-        }}
-        onOpenOcrModal={() => {
-          setOcrInitialFile(null);
-          setIsOcrModalOpen(true);
-        }}
-        onOpenStyleCenter={() => setIsStyleCenterOpen(true)}
-        onOpenExportModal={() => setIsExportModalOpen(true)}
-        onOpenQuickHelp={() => setIsQuickHelpOpen(true)}
-        onOpenNewPerson={() => {
-          setEditingPerson(null);
-          setPendingNewPersonCoords(null);
-          setIsPersonModalOpen(true);
-        }}
-        onExportCsv={handleExportCsv}
-        onExportJson={handleExportJson}
-        onImportJson={handleImportJson}
-      />
+      {/* Top Navigation & Data Center Project Engineering Bar (Hidden in Presentation Mode) */}
+      {!isPresentationMode && (
+        <TopNav
+          activeView={activeView}
+          onChangeView={(v) => setActiveView(v)}
+          projects={projects}
+          activeProject={activeProject}
+          onSelectProject={handleSelectProject}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebar={() => setSidebarCollapsed((prev) => !prev)}
+          isLayerPanelOpen={isLayerPanelOpen}
+          onToggleLayerPanel={() => setIsLayerPanelOpen((prev) => !prev)}
+          focusedPersonName={focusedPerson ? focusedPerson.name : null}
+          onClearFocus={() => {
+            setFocusedPersonId(null);
+          }}
+          canUndo={history.length > 0}
+          canRedo={future.length > 0}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          onAutoLayoutFaction={handleAutoLayoutFaction}
+          onAutoLayoutHierarchy={handleAutoLayoutHierarchy}
+          onOpenSnapshotDiff={() => setIsSnapshotDrawerOpen(true)}
+          hasActiveSnapshotDiff={Boolean(activeSnapshotDiffId)}
+          isPresentationMode={isPresentationMode}
+          onTogglePresentationMode={() => {
+            setIsPresentationMode(true);
+            setActiveView('canvas');
+            setIsSnapshotDrawerOpen(false);
+            setTimelinePerson(null);
+            setTimeout(() => setFitViewTrigger((prev) => prev + 1), 40);
+          }}
+          onOpenOcrModal={() => {
+            setOcrInitialFile(null);
+            setIsOcrModalOpen(true);
+          }}
+          onOpenStyleCenter={() => setIsStyleCenterOpen(true)}
+          onOpenExportModal={() => setIsExportModalOpen(true)}
+          onOpenQuickHelp={() => setIsQuickHelpOpen(true)}
+          onOpenNewPerson={() => {
+            setEditingPerson(null);
+            setPendingNewPersonCoords(null);
+            setIsPersonModalOpen(true);
+          }}
+          onExportCsv={handleExportCsv}
+          onExportJson={handleExportJson}
+          onImportJson={handleImportJson}
+        />
+      )}
 
       {/* Main Viewport: Either Project Dashboard OR Interactive Topology Canvas */}
-      <div className="flex flex-1 h-[calc(100vh-5.5rem)] w-full overflow-hidden relative">
+      <div className="flex flex-1 min-h-0 w-full overflow-hidden relative">
         {activeView === 'dashboard' ? (
           <ProjectDashboard
             projects={projects}
@@ -1223,37 +1594,35 @@ export default function App() {
               setIsPersonModalOpen(true);
             }}
             onOpenTimeline={(person) => setTimelinePerson(person)}
-            onOpenInfluencePath={() => {
-              setInfluencePathTargetId(null);
-              setIsInfluencePathOpen(true);
-            }}
           />
         ) : (
           <>
-            <Sidebar
-              isCollapsed={sidebarCollapsed}
-              onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
-              people={people}
-              onNewPerson={() => {
-                setEditingPerson(null);
-                setPendingNewPersonCoords(null);
-                setIsPersonModalOpen(true);
-              }}
-              onSelectPerson={(person) => {
-                if (!person.onCanvas) {
-                  handleAddToCanvas(person.id);
-                } else {
-                  setFocusedPersonId((prev) => (prev === person.id ? null : person.id));
-                }
-              }}
-              onEditPerson={(person) => {
-                setEditingPerson(person);
-                setIsPersonModalOpen(true);
-              }}
-              onAddToCanvas={(id) => handleAddToCanvas(id)}
-              onRemoveFromCanvas={handleRemoveFromCanvas}
-              onLoadSampleData={() => setIsConfirmSampleOpen(true)}
-            />
+            {!isPresentationMode && (
+              <Sidebar
+                isCollapsed={sidebarCollapsed}
+                onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+                people={people}
+                onNewPerson={() => {
+                  setEditingPerson(null);
+                  setPendingNewPersonCoords(null);
+                  setIsPersonModalOpen(true);
+                }}
+                onSelectPerson={(person) => {
+                  if (!person.onCanvas) {
+                    handleAddToCanvas(person.id);
+                  } else {
+                    setFocusedPersonId((prev) => (prev === person.id ? null : person.id));
+                  }
+                }}
+                onEditPerson={(person) => {
+                  setEditingPerson(person);
+                  setIsPersonModalOpen(true);
+                }}
+                onAddToCanvas={(id) => handleAddToCanvas(id)}
+                onRemoveFromCanvas={handleRemoveFromCanvas}
+                onLoadSampleData={() => setIsConfirmSampleOpen(true)}
+              />
+            )}
 
             <Canvas
               people={people}
@@ -1275,13 +1644,27 @@ export default function App() {
               focusedPersonId={focusedPersonId}
               onSetFocusedPersonId={(id) => {
                 setFocusedPersonId(id);
-                if (id) setHighlightedPathIds(null);
               }}
-              highlightedPathIds={highlightedPathIds}
+              snapshotDiffResult={activeSnapshotDiffResult}
+              activeSnapshotTitle={activeSnapshotTitle}
+              onClearSnapshotDiff={() => setActiveSnapshotDiffId(null)}
+              isPresentationMode={isPresentationMode}
+              onExitPresentationMode={() => {
+                setIsPresentationMode(false);
+                setTimeout(() => setFitViewTrigger((prev) => prev + 1), 40);
+              }}
+              cameraBookmarks={cameraBookmarks}
+              onAddCameraBookmark={handleAddCameraBookmark}
+              onDeleteCameraBookmark={handleDeleteCameraBookmark}
+              onBeforeInlineEdit={recordHistory}
+              onGroupSelectedElements={handleGroupSelectedElements}
+              onUngroupSelectedElements={handleUngroupSelectedElements}
+              onToggleLockSelectedElements={handleToggleLockSelectedElements}
               onOpenTimeline={(p) => setTimelinePerson(p)}
               onUpdatePersonPosition={handleUpdatePersonPosition}
               onBatchUpdatePositions={handleBatchUpdatePositions}
               onAlignPeople={handleAlignPeople}
+              onAlignElements={handleAlignElements}
               onBatchUpdatePeople={handleBatchUpdatePeople}
               onDuplicatePeople={handleDuplicatePeople}
               onBatchRemoveFromCanvas={handleBatchRemoveFromCanvas}
@@ -1326,16 +1709,15 @@ export default function App() {
               onUpdateRelationship={handleUpdateRelationship}
               onUpdateRelationshipOffset={handleUpdateRelationshipOffset}
               onDeleteRelationship={handleDeleteRelationship}
-              onOpenInfluencePathWithPerson={(personId) => {
-                setInfluencePathTargetId(personId);
-                setIsInfluencePathOpen(true);
-              }}
               onAutoLayoutFaction={handleAutoLayoutFaction}
               onAutoLayoutHierarchy={handleAutoLayoutHierarchy}
               fitViewTrigger={fitViewTrigger}
               bgStyleId={stylePrefs.bgStyleId as BackgroundStyleId}
               lineStyleId={stylePrefs.lineStyleId as LineStyleId}
               cardStyleId={stylePrefs.cardStyleId as CardStyleId}
+              bgConfig={activeBgConfig}
+              lineConfig={activeLineConfig}
+              cardConfig={activeCardConfig}
               onOpenStyleCenter={() => setIsStyleCenterOpen(true)}
             />
           </>
@@ -1417,20 +1799,29 @@ export default function App() {
         onClose={() => setIsConfirmSampleOpen(false)}
       />
 
-      {/* Influence Path Modal */}
-      <InfluencePathModal
-        isOpen={isInfluencePathOpen}
-        people={people}
-        relationships={relationships}
-        initialTargetId={influencePathTargetId}
-        onClose={() => {
-          setIsInfluencePathOpen(false);
-          setInfluencePathTargetId(null);
+      {/* Module 1.3: Timeline & Snapshot Diff Drawer */}
+      <SnapshotDiffDrawer
+        isOpen={isSnapshotDrawerOpen}
+        projectId={activeProjectId}
+        snapshots={projectSnapshots}
+        currentPeople={people}
+        currentRelationships={relationships}
+        currentFrames={groupFrames}
+        currentAnnotations={annotations}
+        activeDiffSnapshotId={activeSnapshotDiffId}
+        onClose={() => setIsSnapshotDrawerOpen(false)}
+        onCreateSnapshot={handleCreateSnapshot}
+        onDeleteSnapshot={handleDeleteSnapshot}
+        onToggleCanvasDiff={(snapId) => {
+          setActiveSnapshotDiffId(snapId);
+          if (snapId) {
+            setActiveView('canvas');
+          }
         }}
-        onApplyPathFocus={(path) => {
+        onRestoreSnapshot={handleRestoreSnapshot}
+        onFocusPersonOnCanvas={(personId) => {
           setActiveView('canvas');
-          setHighlightedPathIds(path);
-          setFocusedPersonId(null);
+          setFocusedPersonId(personId);
         }}
       />
 
@@ -1445,16 +1836,26 @@ export default function App() {
         onUpdateStage={handleUpdateStage}
       />
 
-      {/* Style Center Modal (20 Backgrounds x 20 Lines x 20 Cards) */}
+      {/* Style Center & Custom Style Studio Modal */}
       <StyleCenterModal
         isOpen={isStyleCenterOpen}
         onClose={() => setIsStyleCenterOpen(false)}
         bgStyleId={stylePrefs.bgStyleId as BackgroundStyleId}
         lineStyleId={stylePrefs.lineStyleId as LineStyleId}
         cardStyleId={stylePrefs.cardStyleId as CardStyleId}
+        activeBgConfig={activeBgConfig}
+        activeLineConfig={activeLineConfig}
+        activeCardConfig={activeCardConfig}
+        savedCustomSchemes={stylePrefs.savedCustomSchemes || []}
         onSelectBgStyle={handleSelectBgStyle}
         onSelectLineStyle={handleSelectLineStyle}
         onSelectCardStyle={handleSelectCardStyle}
+        onApplyCustomBg={handleApplyCustomBg}
+        onApplyCustomLine={handleApplyCustomLine}
+        onApplyCustomCard={handleApplyCustomCard}
+        onSaveCustomScheme={handleSaveCustomScheme}
+        onApplyCustomScheme={handleApplyCustomScheme}
+        onDeleteCustomScheme={handleDeleteCustomScheme}
         onApplyBundle={handleApplyBundle}
         onResetDefaults={handleResetDefaults}
       />

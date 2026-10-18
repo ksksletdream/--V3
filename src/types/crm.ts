@@ -19,13 +19,50 @@ export type CanvasToolMode =
   | 'frame'
   | 'pen'
   | 'highlighter'
+  | 'shape'
+  | 'text'
   | 'laser'
   | 'sticky'
   | 'eraser';
 
-export type AnnotationKind = 'pen' | 'highlighter' | 'shape' | 'sticky';
+export type AnnotationKind = 'pen' | 'highlighter' | 'shape' | 'text' | 'sticky';
 
-export type SmartShapeType = 'rect' | 'ellipse' | 'line' | 'arrow';
+export type SmartShapeType =
+  | 'rect'
+  | 'rounded-rect'
+  | 'ellipse'
+  | 'diamond'
+  | 'triangle'
+  | 'parallelogram'
+  | 'hexagon'
+  | 'cylinder'
+  | 'cloud'
+  | 'star'
+  | 'callout-bubble'
+  | 'arrow-block'
+  | 'line'
+  | 'arrow';
+
+export const COMMON_SHAPE_ITEMS: {
+  key: SmartShapeType;
+  labelZh: string;
+  labelEn: string;
+  defaultW: number;
+  defaultH: number;
+}[] = [
+  { key: 'rect', labelZh: '矩形框', labelEn: 'Rectangle', defaultW: 160, defaultH: 100 },
+  { key: 'rounded-rect', labelZh: '圆角矩形', labelEn: 'Rounded Rect', defaultW: 160, defaultH: 100 },
+  { key: 'ellipse', labelZh: '圆形 / 椭圆', labelEn: 'Circle / Ellipse', defaultW: 140, defaultH: 110 },
+  { key: 'diamond', labelZh: '菱形决策框', labelEn: 'Diamond', defaultW: 160, defaultH: 115 },
+  { key: 'triangle', labelZh: '三角形', labelEn: 'Triangle', defaultW: 150, defaultH: 120 },
+  { key: 'parallelogram', labelZh: '平行四边形', labelEn: 'Parallelogram', defaultW: 170, defaultH: 100 },
+  { key: 'hexagon', labelZh: '六边形模块', labelEn: 'Hexagon', defaultW: 165, defaultH: 110 },
+  { key: 'cylinder', labelZh: '数据库圆柱', labelEn: 'Cylinder DB', defaultW: 140, defaultH: 125 },
+  { key: 'cloud', labelZh: '算力云朵', labelEn: 'Cloud', defaultW: 175, defaultH: 115 },
+  { key: 'star', labelZh: '五角星标识', labelEn: 'Star', defaultW: 135, defaultH: 135 },
+  { key: 'callout-bubble', labelZh: '对话气泡框', labelEn: 'Callout Bubble', defaultW: 170, defaultH: 115 },
+  { key: 'arrow-block', labelZh: '宽体导向箭头', labelEn: 'Block Arrow', defaultW: 175, defaultH: 95 },
+];
 
 export type TacticalStampType = 'breakthrough' | 'risk' | 'verify' | 'intel' | 'action';
 
@@ -37,18 +74,41 @@ export interface CanvasAnnotation {
   y: number;
   width: number;
   height: number;
+  /** Rotation angle in degrees (clockwise around center) */
+  rotation?: number;
+  /** Font size in px for text inside shapes or standalone text annotations */
+  fontSize?: number;
   /** Normalized points (0..1) relative to bounding box (x, y, width, height) */
   points?: { x: number; y: number }[];
   arrowStart?: { x: number; y: number };
   arrowEnd?: { x: number; y: number };
+  /** Arrowhead configuration for freehand pen strokes and straight/arrow lines */
+  arrow?: 'none' | 'forward' | 'both';
   color: string;
   strokeWidth: number;
   opacity: number;
   text?: string;
   stamp?: TacticalStampType;
+  /** Custom tactical stamp label text on sticky notes */
+  stampLabel?: string;
+  /** Custom background color on sticky notes or shapes */
+  bgColor?: string;
+  /** Sticky note callout leader line (引出线) configuration */
+  calloutEnabled?: boolean;
+  calloutStyle?: 'solid' | 'dashed';
+  /** Normalized (0..1) origin corner/edge point on the sticky note itself */
+  calloutStartNorm?: { x: number; y: number };
+  /** Editable intermediate corner/elbow vertices (offsets relative to sticky x, y) */
+  calloutElbows?: { x: number; y: number }[];
+  calloutOffsetX?: number;
+  calloutOffsetY?: number;
+  calloutTargetPersonId?: string;
+  /** Normalized (0..1) corner/edge point on the target Person card */
+  calloutTargetNorm?: { x: number; y: number };
   zIndex?: number;      // 图层层级顺序 (默认 140+)
   locked?: boolean;     // 是否锁定位置与尺寸
   hidden?: boolean;     // 是否隐藏图层
+  groupId?: string;     // 多元素逻辑编组 ID
   createdAt: number;
   updatedAt?: number;
 }
@@ -91,6 +151,7 @@ export interface GroupFrame {
   zIndex?: number;      // 图层层级顺序 (默认 10~40)
   locked?: boolean;     // 是否锁定位置与尺寸
   hidden?: boolean;     // 是否隐藏图层
+  groupId?: string;     // 多元素逻辑编组 ID
 }
 
 export interface ProjectMap {
@@ -126,6 +187,8 @@ export interface Person {
   zIndex?: number;        // 图层顺序 (默认 100+)
   locked?: boolean;       // 是否锁定位置
   hidden?: boolean;       // 是否隐藏图层
+  groupId?: string;       // 多元素逻辑编组 ID
+  influenceWeight?: number; // 决策影响力权重 (0 ~ 100)，用于四象限矩阵分析与双向拖拽赋权
   relationshipStage?: RelationshipStage; // 关系推进温度阶段
   specialty?: string;     // 数据中心专业分管模块
   vendorPreference?: string; // 品牌倾向与历史偏好
@@ -133,6 +196,26 @@ export interface Person {
   email?: string;         // 电子邮箱
   createdAt: number;
   updatedAt: number;
+}
+
+export interface ProjectSnapshot {
+  id: string;
+  projectId: string;
+  title: string;          // 如："一阶段立项前摸底"、"招投标前夕定盘"
+  createdAt: string;
+  note?: string;
+  people: Person[];
+  relationships: Relationship[];
+  frames: GroupFrame[];
+  annotations: CanvasAnnotation[];
+}
+
+export interface CameraBookmark {
+  id: string;
+  title: string;
+  panX: number;
+  panY: number;
+  zoom: number;
 }
 
 export interface RelationTemplate {

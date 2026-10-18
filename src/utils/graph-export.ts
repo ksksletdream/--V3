@@ -13,8 +13,12 @@ import {
   CARD_WIDTH,
   CARD_HEIGHT,
   getAnchorPoint,
+  getClosestAnchor,
   calculateConnectionPath,
   generateSmoothSvgPathFromNormalized,
+  computeNaturalArrowhead,
+  computeStickyCalloutGeometry,
+  buildCommonShapeSvgPath,
 } from './graph-math.ts';
 import { calculateRelationshipStrength } from './relationship-strength.ts';
 
@@ -173,11 +177,19 @@ export function resolveCardVisuals(
   const accentStyle = cardConfig?.accentStyle || 'bar';
 
   let rx = 12;
-  if (cardConfig?.roundedClass === 'rounded-xs' || cardConfig?.roundedClass === 'rounded-sm') rx = 4;
-  else if (cardConfig?.roundedClass === 'rounded-lg') rx = 8;
-  else if (cardConfig?.roundedClass === 'rounded-xl') rx = 12;
-  else if (cardConfig?.roundedClass === 'rounded-2xl') rx = 16;
-  else if (cardConfig?.roundedClass === 'rounded-3xl') rx = 22;
+  if (cardConfig?.customBorderRadius !== undefined) {
+    rx = cardConfig.customBorderRadius;
+  } else if (cardConfig?.roundedClass === 'rounded-xs' || cardConfig?.roundedClass === 'rounded-sm') {
+    rx = 4;
+  } else if (cardConfig?.roundedClass === 'rounded-lg') {
+    rx = 8;
+  } else if (cardConfig?.roundedClass === 'rounded-xl') {
+    rx = 12;
+  } else if (cardConfig?.roundedClass === 'rounded-2xl') {
+    rx = 16;
+  } else if (cardConfig?.roundedClass === 'rounded-3xl') {
+    rx = 22;
+  }
 
   let fill = isDarkCard ? '#0f172a' : '#ffffff';
   let stroke = isDarkCard ? '#334155' : '#e2e8f0';
@@ -282,7 +294,26 @@ export function resolveCardVisuals(
       break;
   }
 
-  if (accentStyle === 'frame' && id !== 'pop-art-neo') {
+  if (cardConfig?.customBgColor) {
+    fill = cardConfig.customBgColor;
+  }
+  if (cardConfig?.customBorderColor) {
+    stroke = cardConfig.customBorderColor;
+  }
+  if (cardConfig?.customBorderWidth !== undefined) {
+    strokeWidth = cardConfig.customBorderWidth;
+  }
+  if (cardConfig?.customBorderStyle === 'dashed') {
+    strokeDasharray = '5,3';
+  }
+  if (cardConfig?.shadowClass?.includes('4px_4px_0px')) {
+    hardShadow = true;
+  }
+
+  if (accentStyle === 'full') {
+    fill = `${personCardColor}18`;
+  }
+  if (accentStyle === 'frame' && id !== 'pop-art-neo' && !cardConfig?.customBorderColor) {
     stroke = personCardColor || stroke;
   }
 
@@ -319,7 +350,19 @@ export function resolveBackgroundPattern(bgConfig: BackgroundStyleConfig | undef
   const id = bgConfig?.id || 'grid-dots-slate';
   const bgColor = bgConfig?.backgroundColor || '#f8fafc';
   const isDark = bgConfig?.isDark ?? false;
-  const spacing = parseInt(bgConfig?.backgroundSize || '24', 10) || 24;
+  const spacing = bgConfig?.spacing || parseInt(bgConfig?.backgroundSize || '24', 10) || 24;
+
+  if (bgConfig?.patternType) {
+    return {
+      bgColor,
+      isDark,
+      patternType: bgConfig.patternType,
+      patternColor: bgConfig.patternColor || (isDark ? '#334155' : '#cbd5e1'),
+      spacing,
+      dotRadius: bgConfig.dotRadius ?? 1.2,
+      gradientStops: bgConfig.gradientStops,
+    };
+  }
 
   switch (id) {
     case 'grid-square-subtle':
@@ -375,25 +418,13 @@ export function resolveBackgroundPattern(bgConfig: BackgroundStyleConfig | undef
     case 'obsidian-night':
       return { bgColor, isDark, patternType: 'dots', patternColor: '#334155', spacing: 24, dotRadius: 1.4 };
     case 'warm-parchment':
-      return { bgColor, isDark, patternType: 'dots', patternColor: '#d4c5a9', spacing: 22, dotRadius: 1.2 };
+      return { bgColor, isDark, patternType: 'solid', patternColor: '#d4c5a9', spacing: 22, dotRadius: 1.2 };
     case 'nordic-frost':
       return { bgColor, isDark, patternType: 'dots', patternColor: '#bae6fd', spacing: 24, dotRadius: 1.5 };
     case 'emerald-matrix':
       return { bgColor, isDark, patternType: 'dots', patternColor: 'rgba(16,185,129,0.35)', spacing: 26, dotRadius: 1.3 };
-    case 'amethyst-glow':
-      return { bgColor, isDark, patternType: 'dots', patternColor: '#d8b4fe', spacing: 24, dotRadius: 1.3 };
-    case 'warm-latte':
-      return { bgColor, isDark, patternType: 'dots', patternColor: '#d6c7b2', spacing: 22, dotRadius: 1.3 };
-    case 'honeycomb-hex':
-      return { bgColor, isDark, patternType: 'dots', patternColor: '#cbd5e1', spacing: 28, dotRadius: 1.5 };
-    case 'misty-marine':
-      return { bgColor, isDark, patternType: 'dots', patternColor: '#86efac', spacing: 24, dotRadius: 1.3 };
-    case 'concrete-slate':
-      return { bgColor, isDark, patternType: 'dots', patternColor: '#b0bec5', spacing: 24, dotRadius: 1.4 };
-    case 'deep-cosmos':
-      return { bgColor, isDark, patternType: 'dots', patternColor: 'rgba(147,197,253,0.45)', spacing: 32, dotRadius: 1.3 };
     default:
-      return { bgColor, isDark, patternType: 'dots', patternColor: '#cbd5e1', spacing: 24, dotRadius: 1.2 };
+      return { bgColor, isDark, patternType: 'solid', patternColor: '#cbd5e1', spacing: 24, dotRadius: 1.2 };
   }
 }
 
@@ -785,39 +816,181 @@ export function generateGraphSvgString(options: ExportOptions): string {
         if (d) {
           svg += `    <path d="${d}" fill="none" stroke="${aColor}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" opacity="${op}" />\n`;
         }
-      } else if (ann.kind === 'shape') {
-        if (ann.shapeType === 'rect') {
-          svg += `    <rect x="${ax}" y="${ay}" width="${ann.width}" height="${ann.height}" rx="10" fill="${aColor}12" stroke="${aColor}" stroke-width="${sw}" opacity="${op}" />\n`;
-        } else if (ann.shapeType === 'ellipse') {
-          svg += `    <ellipse cx="${ax + ann.width / 2}" cy="${ay + ann.height / 2}" rx="${ann.width / 2}" ry="${ann.height / 2}" fill="${aColor}12" stroke="${aColor}" stroke-width="${sw}" opacity="${op}" />\n`;
-        } else {
-          const pts = ann.points && ann.points.length >= 2
-            ? [
-                { x: ax + ann.points[0].x * ann.width, y: ay + ann.points[0].y * ann.height },
-                { x: ax + ann.points[ann.points.length - 1].x * ann.width, y: ay + ann.points[ann.points.length - 1].y * ann.height },
-              ]
-            : [
-                { x: ax, y: ay + ann.height / 2 },
-                { x: ax + ann.width, y: ay + ann.height / 2 },
-              ];
-          svg += `    <line x1="${pts[0].x}" y1="${pts[0].y}" x2="${pts[1].x}" y2="${pts[1].y}" stroke="${aColor}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}" />\n`;
-          if (ann.shapeType === 'arrow') {
-            const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
-            const headLen = Math.max(12, sw * 3.2);
-            const x1 = pts[1].x - headLen * Math.cos(angle - Math.PI / 6);
-            const y1 = pts[1].y - headLen * Math.sin(angle - Math.PI / 6);
-            const x2 = pts[1].x - headLen * Math.cos(angle + Math.PI / 6);
-            const y2 = pts[1].y - headLen * Math.sin(angle + Math.PI / 6);
-            svg += `    <polygon points="${pts[1].x},${pts[1].y} ${x1},${y1} ${x2},${y2}" fill="${aColor}" opacity="${op}" />\n`;
+        if (ann.kind === 'pen' && ann.points && ann.points.length >= 2 && ann.arrow && ann.arrow !== 'none') {
+          const worldPts = ann.points.map((np) => ({
+            x: ax + np.x * ann.width,
+            y: ay + np.y * ann.height,
+          }));
+          const endArrow = computeNaturalArrowhead(worldPts, sw, 'end');
+          if (endArrow) {
+            svg += `    <polygon points="${endArrow.polygonPoints}" fill="${aColor}" opacity="${op}" />\n`;
+          }
+          if (ann.arrow === 'both') {
+            const startArrow = computeNaturalArrowhead(worldPts, sw, 'start');
+            if (startArrow) {
+              svg += `    <polygon points="${startArrow.polygonPoints}" fill="${aColor}" opacity="${op}" />\n`;
+            }
           }
         }
+      } else if (ann.kind === 'shape') {
+        const rot = ann.rotation || 0;
+        const cx = ax + ann.width / 2;
+        const cy = ay + ann.height / 2;
+        const rotTransform = rot ? ` transform="rotate(${rot.toFixed(1)} ${cx.toFixed(1)} ${cy.toFixed(1)})"` : '';
+        svg += `    <g${rotTransform}>\n`;
+        if (ann.shapeType === 'line' || ann.shapeType === 'arrow') {
+          const sNorm = ann.arrowStart || ann.points?.[0] || { x: 0, y: 0.5 };
+          const eNorm = ann.arrowEnd || ann.points?.[ann.points ? ann.points.length - 1 : 1] || { x: 1, y: 0.5 };
+          const pts = [
+            { x: ax + sNorm.x * ann.width, y: ay + sNorm.y * ann.height },
+            { x: ax + eNorm.x * ann.width, y: ay + eNorm.y * ann.height },
+          ];
+          svg += `      <line x1="${pts[0].x}" y1="${pts[0].y}" x2="${pts[1].x}" y2="${pts[1].y}" stroke="${aColor}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}" />\n`;
+          const effectiveArrow = ann.arrow ?? (ann.shapeType === 'arrow' ? 'forward' : 'none');
+          if (effectiveArrow === 'forward' || effectiveArrow === 'both') {
+            const endArrow = computeNaturalArrowhead(pts, sw, 'end');
+            if (endArrow) {
+              svg += `      <polygon points="${endArrow.polygonPoints}" fill="${aColor}" opacity="${op}" />\n`;
+            }
+          }
+          if (effectiveArrow === 'both') {
+            const startArrow = computeNaturalArrowhead(pts, sw, 'start');
+            if (startArrow) {
+              svg += `      <polygon points="${startArrow.polygonPoints}" fill="${aColor}" opacity="${op}" />\n`;
+            }
+          }
+        } else {
+          const { mainPath, detailPath } = buildCommonShapeSvgPath(
+            ann.shapeType || 'rect',
+            ann.width,
+            ann.height,
+            sw
+          );
+          const fillCol = ann.bgColor ? ann.bgColor : `${aColor}16`;
+          svg += `      <g transform="translate(${ax}, ${ay})">\n`;
+          svg += `        <path d="${mainPath}" fill="${fillCol}" stroke="${aColor}" stroke-width="${sw}" stroke-linejoin="round" opacity="${op}" />\n`;
+          if (detailPath) {
+            svg += `        <path d="${detailPath}" fill="none" stroke="${aColor}" stroke-width="${sw}" stroke-linejoin="round" opacity="${op}" />\n`;
+          }
+          if (ann.text && ann.text.trim()) {
+            const fSize = ann.fontSize || 13;
+            const charsPerLine = Math.max(4, Math.floor((ann.width - 24) / (fSize * 0.95)));
+            const paragraphs = ann.text.split('\n');
+            const wrappedLines: string[] = [];
+            paragraphs.forEach((para) => {
+              if (!para) {
+                wrappedLines.push('');
+              } else {
+                for (let i = 0; i < para.length; i += charsPerLine) {
+                  wrappedLines.push(para.slice(i, i + charsPerLine));
+                }
+              }
+            });
+            const lineH = Math.round(fSize * 1.38);
+            const totalTextH = wrappedLines.length * lineH;
+            const startY = ann.height / 2 - totalTextH / 2 + fSize * 0.85;
+            wrappedLines.forEach((lineStr, idx) => {
+              svg += `        <text x="${(ann.width / 2).toFixed(1)}" y="${(startY + idx * lineH).toFixed(1)}" text-anchor="middle" font-size="${fSize}" font-weight="600" fill="${aColor}">${escapeXml(lineStr)}</text>\n`;
+            });
+          }
+          svg += `      </g>\n`;
+        }
+        svg += `    </g>\n`;
+      } else if (ann.kind === 'text') {
+        const rot = ann.rotation || 0;
+        const cx = ax + ann.width / 2;
+        const cy = ay + ann.height / 2;
+        const rotTransform = rot ? ` transform="rotate(${rot.toFixed(1)} ${cx.toFixed(1)} ${cy.toFixed(1)})"` : '';
+        const fSize = ann.fontSize || 14;
+        const charsPerLine = Math.max(4, Math.floor((ann.width - 16) / (fSize * 0.95)));
+        const paragraphs = (ann.text || '').split('\n');
+        const wrappedLines: string[] = [];
+        paragraphs.forEach((para) => {
+          if (!para) {
+            wrappedLines.push('');
+          } else {
+            for (let i = 0; i < para.length; i += charsPerLine) {
+              wrappedLines.push(para.slice(i, i + charsPerLine));
+            }
+          }
+        });
+        const lineH = Math.round(fSize * 1.4);
+        svg += `    <g transform="translate(${ax}, ${ay})"${rotTransform}>\n`;
+        if (ann.bgColor && ann.bgColor !== 'transparent') {
+          svg += `      <rect width="${ann.width}" height="${ann.height}" rx="8" fill="${ann.bgColor}" stroke="${aColor}44" stroke-width="1" />\n`;
+        }
+        wrappedLines.forEach((lineStr, idx) => {
+          svg += `      <text x="8" y="${12 + fSize + idx * lineH}" font-size="${fSize}" font-weight="600" fill="${aColor}">${escapeXml(lineStr)}</text>\n`;
+        });
+        svg += `    </g>\n`;
       } else if (ann.kind === 'sticky') {
+        if (ann.calloutEnabled) {
+          let targetOverride: { x: number; y: number } | undefined;
+          if (ann.calloutTargetPersonId) {
+            const targetPerson = peopleMap.get(ann.calloutTargetPersonId);
+            if (targetPerson) {
+              if (ann.calloutTargetNorm) {
+                targetOverride = {
+                  x: targetPerson.x + ann.calloutTargetNorm.x * CARD_WIDTH - bounds.offsetX,
+                  y: targetPerson.y + ann.calloutTargetNorm.y * CARD_HEIGHT - bounds.offsetY,
+                };
+              } else {
+                const stickyCenter = {
+                  x: ann.x + ann.width / 2,
+                  y: ann.y + ann.height / 2,
+                };
+                const anchor = getClosestAnchor(stickyCenter, {
+                  x: targetPerson.x,
+                  y: targetPerson.y,
+                  width: CARD_WIDTH,
+                  height: CARD_HEIGHT,
+                });
+                const worldAnchor = getAnchorPoint(
+                  {
+                    x: targetPerson.x,
+                    y: targetPerson.y,
+                    width: CARD_WIDTH,
+                    height: CARD_HEIGHT,
+                  },
+                  anchor
+                );
+                targetOverride = {
+                  x: worldAnchor.x - bounds.offsetX,
+                  y: worldAnchor.y - bounds.offsetY,
+                };
+              }
+            }
+          }
+          const callout = computeStickyCalloutGeometry(
+            {
+              x: ax,
+              y: ay,
+              width: ann.width,
+              height: ann.height,
+              calloutStartNorm: ann.calloutStartNorm,
+              calloutElbows: ann.calloutElbows,
+              calloutOffsetX: ann.calloutOffsetX,
+              calloutOffsetY: ann.calloutOffsetY,
+            },
+            targetOverride
+          );
+          const dashAttr = ann.calloutStyle === 'dashed' ? ' stroke-dasharray="6,4"' : '';
+          svg += `    <path d="${callout.pathD}" fill="none" stroke="${aColor}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"${dashAttr} />\n`;
+          svg += `    <circle cx="${callout.startPt.x.toFixed(1)}" cy="${callout.startPt.y.toFixed(1)}" r="4" fill="#ffffff" stroke="${aColor}" stroke-width="2" />\n`;
+          callout.elbowPts.forEach((ep) => {
+            svg += `    <circle cx="${ep.x.toFixed(1)}" cy="${ep.y.toFixed(1)}" r="3.2" fill="#ffffff" stroke="${aColor}" stroke-width="1.8" />\n`;
+          });
+          svg += `    <circle cx="${callout.endPt.x.toFixed(1)}" cy="${callout.endPt.y.toFixed(1)}" r="4" fill="#ffffff" stroke="${aColor}" stroke-width="2" />\n`;
+        }
         const stampMeta = TACTICAL_STAMPS.find((s) => s.key === ann.stamp) || TACTICAL_STAMPS[0];
+        const stampText = (ann.stampLabel && ann.stampLabel.trim()) || stampMeta.labelZh;
+        const noteBg = ann.bgColor || stampMeta.bgLight;
+        const badgeW = Math.max(58, stampText.length * 10 + 18);
         const lines = wrapBioLines(ann.text || '战术攻关批注', 15);
         svg += `    <g transform="translate(${ax}, ${ay})">\n`;
-        svg += `      <rect width="${ann.width}" height="${ann.height}" rx="12" fill="${stampMeta.bgLight}" stroke="${aColor}" stroke-width="1.6" filter="url(#card-shadow)" />\n`;
-        svg += `      <rect x="10" y="10" width="64" height="18" rx="4" fill="${aColor}" />\n`;
-        svg += `      <text x="42" y="22" text-anchor="middle" font-size="9.5" font-weight="bold" fill="#ffffff">${escapeXml(stampMeta.labelZh)}</text>\n`;
+        svg += `      <rect width="${ann.width}" height="${ann.height}" rx="12" fill="${noteBg}" stroke="${aColor}" stroke-width="1.6" filter="url(#card-shadow)" />\n`;
+        svg += `      <rect x="10" y="10" width="${badgeW}" height="18" rx="4" fill="${aColor}" />\n`;
+        svg += `      <text x="${10 + badgeW / 2}" y="22" text-anchor="middle" font-size="9.5" font-weight="bold" fill="#ffffff">${escapeXml(stampText)}</text>\n`;
         lines.forEach((line, idx) => {
           svg += `      <text x="12" y="${46 + idx * 16}" font-size="11" font-weight="500" fill="#1e293b">${escapeXml(line)}</text>\n`;
         });
@@ -1370,72 +1543,266 @@ export function drawStyledGraphOnCanvas2D(
           ctx.stroke(p2d);
         } catch {}
       }
-    } else if (ann.kind === 'shape') {
-      if (ann.shapeType === 'rect') {
-        ctx.fillStyle = `${aColor}15`;
-        ctx.beginPath();
-        if (ctx.roundRect) {
-          ctx.roundRect(ax, ay, ann.width, ann.height, 10);
-        } else {
-          ctx.rect(ax, ay, ann.width, ann.height);
+      if (ann.kind === 'pen' && ann.points && ann.points.length >= 2 && ann.arrow && ann.arrow !== 'none') {
+        const worldPts = ann.points.map((np) => ({
+          x: ax + np.x * ann.width,
+          y: ay + np.y * ann.height,
+        }));
+        const endArrow = computeNaturalArrowhead(worldPts, sw, 'end');
+        if (endArrow) {
+          ctx.beginPath();
+          ctx.moveTo(endArrow.tip.x, endArrow.tip.y);
+          ctx.lineTo(endArrow.leftWing.x, endArrow.leftWing.y);
+          ctx.lineTo(endArrow.notch.x, endArrow.notch.y);
+          ctx.lineTo(endArrow.rightWing.x, endArrow.rightWing.y);
+          ctx.closePath();
+          ctx.fill();
         }
-        ctx.fill();
-        ctx.stroke();
-      } else if (ann.shapeType === 'ellipse') {
-        ctx.fillStyle = `${aColor}15`;
-        ctx.beginPath();
-        ctx.ellipse(
-          ax + ann.width / 2,
-          ay + ann.height / 2,
-          Math.max(4, ann.width / 2),
-          Math.max(4, ann.height / 2),
-          0,
-          0,
-          Math.PI * 2
-        );
-        ctx.fill();
-        ctx.stroke();
-      } else {
-        const pts =
-          ann.points && ann.points.length >= 2
-            ? [
-                { x: ax + ann.points[0].x * ann.width, y: ay + ann.points[0].y * ann.height },
-                {
-                  x: ax + ann.points[ann.points.length - 1].x * ann.width,
-                  y: ay + ann.points[ann.points.length - 1].y * ann.height,
-                },
-              ]
-            : [
-                { x: ax, y: ay + ann.height / 2 },
-                { x: ax + ann.width, y: ay + ann.height / 2 },
-              ];
+        if (ann.arrow === 'both') {
+          const startArrow = computeNaturalArrowhead(worldPts, sw, 'start');
+          if (startArrow) {
+            ctx.beginPath();
+            ctx.moveTo(startArrow.tip.x, startArrow.tip.y);
+            ctx.lineTo(startArrow.leftWing.x, startArrow.leftWing.y);
+            ctx.lineTo(startArrow.notch.x, startArrow.notch.y);
+            ctx.lineTo(startArrow.rightWing.x, startArrow.rightWing.y);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+      }
+    } else if (ann.kind === 'shape') {
+      ctx.save();
+      if (ann.rotation) {
+        const cx = ax + ann.width / 2;
+        const cy = ay + ann.height / 2;
+        ctx.translate(cx, cy);
+        ctx.rotate((ann.rotation * Math.PI) / 180);
+        ctx.translate(-cx, -cy);
+      }
+      if (ann.shapeType === 'line' || ann.shapeType === 'arrow') {
+        const sNorm = ann.arrowStart || ann.points?.[0] || { x: 0, y: 0.5 };
+        const eNorm = ann.arrowEnd || ann.points?.[ann.points ? ann.points.length - 1 : 1] || { x: 1, y: 0.5 };
+        const pts = [
+          { x: ax + sNorm.x * ann.width, y: ay + sNorm.y * ann.height },
+          { x: ax + eNorm.x * ann.width, y: ay + eNorm.y * ann.height },
+        ];
         ctx.beginPath();
         ctx.moveTo(pts[0].x, pts[0].y);
         ctx.lineTo(pts[1].x, pts[1].y);
         ctx.stroke();
 
-        if (ann.shapeType === 'arrow') {
-          const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
-          const headLen = Math.max(12, sw * 3.2);
-          ctx.beginPath();
-          ctx.moveTo(pts[1].x, pts[1].y);
-          ctx.lineTo(
-            pts[1].x - headLen * Math.cos(angle - Math.PI / 6),
-            pts[1].y - headLen * Math.sin(angle - Math.PI / 6)
-          );
-          ctx.lineTo(
-            pts[1].x - headLen * Math.cos(angle + Math.PI / 6),
-            pts[1].y - headLen * Math.sin(angle + Math.PI / 6)
-          );
-          ctx.closePath();
-          ctx.fill();
+        const effectiveArrow = ann.arrow ?? (ann.shapeType === 'arrow' ? 'forward' : 'none');
+        if (effectiveArrow === 'forward' || effectiveArrow === 'both') {
+          const endArrow = computeNaturalArrowhead(pts, sw, 'end');
+          if (endArrow) {
+            ctx.beginPath();
+            ctx.moveTo(endArrow.tip.x, endArrow.tip.y);
+            ctx.lineTo(endArrow.leftWing.x, endArrow.leftWing.y);
+            ctx.lineTo(endArrow.notch.x, endArrow.notch.y);
+            ctx.lineTo(endArrow.rightWing.x, endArrow.rightWing.y);
+            ctx.closePath();
+            ctx.fill();
+          }
         }
+        if (effectiveArrow === 'both') {
+          const startArrow = computeNaturalArrowhead(pts, sw, 'start');
+          if (startArrow) {
+            ctx.beginPath();
+            ctx.moveTo(startArrow.tip.x, startArrow.tip.y);
+            ctx.lineTo(startArrow.leftWing.x, startArrow.leftWing.y);
+            ctx.lineTo(startArrow.notch.x, startArrow.notch.y);
+            ctx.lineTo(startArrow.rightWing.x, startArrow.rightWing.y);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+      } else {
+        const { mainPath, detailPath } = buildCommonShapeSvgPath(
+          ann.shapeType || 'rect',
+          ann.width,
+          ann.height,
+          sw
+        );
+        ctx.save();
+        ctx.translate(ax, ay);
+        ctx.fillStyle = ann.bgColor ? ann.bgColor : `${aColor}18`;
+        try {
+          const p2d = new Path2D(mainPath);
+          ctx.fill(p2d);
+          ctx.stroke(p2d);
+          if (detailPath) {
+            const d2d = new Path2D(detailPath);
+            ctx.stroke(d2d);
+          }
+        } catch {}
+
+        if (ann.text && ann.text.trim()) {
+          const fSize = ann.fontSize || 13;
+          const charsPerLine = Math.max(4, Math.floor((ann.width - 24) / (fSize * 0.95)));
+          const paragraphs = ann.text.split('\n');
+          const wrappedLines: string[] = [];
+          paragraphs.forEach((para) => {
+            if (!para) {
+              wrappedLines.push('');
+            } else {
+              for (let i = 0; i < para.length; i += charsPerLine) {
+                wrappedLines.push(para.slice(i, i + charsPerLine));
+              }
+            }
+          });
+          const lineH = Math.round(fSize * 1.38);
+          const totalTextH = wrappedLines.length * lineH;
+          const startY = ann.height / 2 - totalTextH / 2 + fSize * 0.85;
+          ctx.fillStyle = aColor;
+          ctx.font = `bold ${fSize}px "Plus Jakarta Sans", "Noto Sans SC", sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'alphabetic';
+          wrappedLines.forEach((lineStr, idx) => {
+            ctx.fillText(lineStr, ann.width / 2, startY + idx * lineH);
+          });
+        }
+        ctx.restore();
       }
+      ctx.restore();
+    } else if (ann.kind === 'text') {
+      ctx.save();
+      if (ann.rotation) {
+        const cx = ax + ann.width / 2;
+        const cy = ay + ann.height / 2;
+        ctx.translate(cx, cy);
+        ctx.rotate((ann.rotation * Math.PI) / 180);
+        ctx.translate(-cx, -cy);
+      }
+      if (ann.bgColor && ann.bgColor !== 'transparent') {
+        ctx.fillStyle = ann.bgColor;
+        ctx.strokeStyle = `${aColor}44`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (ctx.roundRect) {
+          ctx.roundRect(ax, ay, ann.width, ann.height, 8);
+        } else {
+          ctx.rect(ax, ay, ann.width, ann.height);
+        }
+        ctx.fill();
+        ctx.stroke();
+      }
+      const fSize = ann.fontSize || 14;
+      const charsPerLine = Math.max(4, Math.floor((ann.width - 16) / (fSize * 0.95)));
+      const paragraphs = (ann.text || '').split('\n');
+      const wrappedLines: string[] = [];
+      paragraphs.forEach((para) => {
+        if (!para) {
+          wrappedLines.push('');
+        } else {
+          for (let i = 0; i < para.length; i += charsPerLine) {
+            wrappedLines.push(para.slice(i, i + charsPerLine));
+          }
+        }
+      });
+      const lineH = Math.round(fSize * 1.4);
+      ctx.fillStyle = aColor;
+      ctx.font = `600 ${fSize}px "Plus Jakarta Sans", "Noto Sans SC", sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+      wrappedLines.forEach((lineStr, idx) => {
+        ctx.fillText(lineStr, ax + 8, ay + 12 + fSize + idx * lineH);
+      });
+      ctx.restore();
     } else if (ann.kind === 'sticky') {
+      if (ann.calloutEnabled) {
+        let targetOverride: { x: number; y: number } | undefined;
+        if (ann.calloutTargetPersonId) {
+          const targetPerson = peopleMap.get(ann.calloutTargetPersonId);
+          if (targetPerson) {
+            if (ann.calloutTargetNorm) {
+              targetOverride = {
+                x: targetPerson.x + ann.calloutTargetNorm.x * CARD_WIDTH - bounds.offsetX,
+                y: targetPerson.y + ann.calloutTargetNorm.y * CARD_HEIGHT - bounds.offsetY,
+              };
+            } else {
+              const stickyCenter = {
+                x: ann.x + ann.width / 2,
+                y: ann.y + ann.height / 2,
+              };
+              const anchor = getClosestAnchor(stickyCenter, {
+                x: targetPerson.x,
+                y: targetPerson.y,
+                width: CARD_WIDTH,
+                height: CARD_HEIGHT,
+              });
+              const worldAnchor = getAnchorPoint(
+                {
+                  x: targetPerson.x,
+                  y: targetPerson.y,
+                  width: CARD_WIDTH,
+                  height: CARD_HEIGHT,
+                },
+                anchor
+              );
+              targetOverride = {
+                x: worldAnchor.x - bounds.offsetX,
+                y: worldAnchor.y - bounds.offsetY,
+              };
+            }
+          }
+        }
+        const callout = computeStickyCalloutGeometry(
+          {
+            x: ax,
+            y: ay,
+            width: ann.width,
+            height: ann.height,
+            calloutStartNorm: ann.calloutStartNorm,
+            calloutElbows: ann.calloutElbows,
+            calloutOffsetX: ann.calloutOffsetX,
+            calloutOffsetY: ann.calloutOffsetY,
+          },
+          targetOverride
+        );
+        ctx.save();
+        ctx.strokeStyle = aColor;
+        ctx.fillStyle = aColor;
+        ctx.lineWidth = 2.2;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        if (ann.calloutStyle === 'dashed') {
+          ctx.setLineDash([6, 4]);
+        }
+        ctx.beginPath();
+        callout.allPoints.forEach((pt, idx) => {
+          if (idx === 0) ctx.moveTo(pt.x, pt.y);
+          else ctx.lineTo(pt.x, pt.y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(callout.startPt.x, callout.startPt.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(callout.endPt.x, callout.endPt.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        callout.elbowPts.forEach((ep) => {
+          ctx.beginPath();
+          ctx.arc(ep.x, ep.y, 3.2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
       const stampMeta = TACTICAL_STAMPS.find((s) => s.key === ann.stamp) || TACTICAL_STAMPS[0];
+      const stampText = (ann.stampLabel && ann.stampLabel.trim()) || stampMeta.labelZh;
+      const noteBg = ann.bgColor || stampMeta.bgLight;
+      const badgeW = Math.max(58, stampText.length * 10 + 18);
       const lines = wrapBioLines(ann.text || '战术攻关批注', 15);
       ctx.globalAlpha = 1;
-      ctx.fillStyle = stampMeta.bgLight;
+      ctx.fillStyle = noteBg;
       ctx.strokeStyle = aColor;
       ctx.lineWidth = 1.6;
       ctx.beginPath();
@@ -1450,9 +1817,9 @@ export function drawStyledGraphOnCanvas2D(
       ctx.fillStyle = aColor;
       ctx.beginPath();
       if (ctx.roundRect) {
-        ctx.roundRect(ax + 10, ay + 10, 64, 18, 4);
+        ctx.roundRect(ax + 10, ay + 10, badgeW, 18, 4);
       } else {
-        ctx.rect(ax + 10, ay + 10, 64, 18);
+        ctx.rect(ax + 10, ay + 10, badgeW, 18);
       }
       ctx.fill();
 
@@ -1460,7 +1827,7 @@ export function drawStyledGraphOnCanvas2D(
       ctx.font = 'bold 9.5px "Plus Jakarta Sans", "Noto Sans SC", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(stampMeta.labelZh, ax + 42, ay + 19);
+      ctx.fillText(stampText, ax + 10 + badgeW / 2, ay + 19);
 
       ctx.fillStyle = '#1e293b';
       ctx.font = '500 11px "Plus Jakarta Sans", "Noto Sans SC", sans-serif';

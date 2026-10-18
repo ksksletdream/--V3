@@ -36,37 +36,33 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({ isOpen, onClose 
   const shortcuts = useMemo(() => {
     if (language === 'zh') {
       return [
-        { action: '指针与框选模式 (快捷键 V)', method: '点击卡片选中，在画布空白处拖拽即可拉出矩形框选多个要素', icon: MousePointer },
+        { action: '选择与框选模式 (默认快捷键 Space)', method: '按空格键快速切回选择与框选模式；点击选中卡片，在画布空白处拖拽拉出矩形框选多个要素', icon: MousePointer },
+        { action: '抓手平移与缩放画布 (快捷键 H)', method: '按 H 键切换抓手工具拖拽平移画布，或使用触控板双指平移；Ctrl + 滚轮缩放', icon: Move },
         { action: '矩形框选与自由套索 (M / L)', method: '支持矩形框选或自由画圈套索圈选，选中后支持批量移动、对齐、变色与打包成组', icon: BoxSelect },
-        { action: '自由套索圈选 (快捷键 L)', method: '按住鼠标左键沿任意轨迹画圈，自动选中闭合区域内的所有卡片与分组框', icon: Lasso },
-        { action: '全方位右键菜单 (Right Click)', method: '在人物卡、连线、分组框或画布空白处点击右键，呼出专属快捷菜单', icon: Tag },
-        { action: '图层管理与上下移动', method: '通过顶部“图层管理”面板或右键菜单，将任意要素置于顶层/上移/下移/置于底层', icon: Layers },
+        { action: '自由套索智能圈选与刀切 (快捷键 L)', method: '支持圈选节点、手绘闭合圈直接生成分组框、按住 Alt 划线切断连线', icon: Lasso },
+        { action: '自由画笔与多箭头样式 (快捷键 P)', method: '支持色盘选色、非箭头/单箭头/双箭头线条及一笔成型几何图形自动规整', icon: Tag },
+        { action: '荧光马克笔与演示激光笔 (G / Z)', method: '马克笔支持色盘高亮；激光笔显示红色发光圆点指针与流光彗星拖尾', icon: Layers },
+        { action: '自定义作战便签与矢量橡皮擦 (N / E)', method: '便签支持自定义战术印章文字、印章颜色与背景色；按 E 启用矢量橡皮擦', icon: Layers },
+        { action: '全方位右键菜单 (Right Click)', method: '在人物卡、连线、分组框、批注或画布空白处点击右键，呼出专属快捷菜单', icon: Tag },
         { action: '可拖动工具栏 (Draggable Menu)', method: '鼠标拖拽顶部把手可将工具栏移动至任意位置，并可一键切换横竖布局', icon: Move },
-        { action: '抓手平移与缩放画布 (快捷键 H)', method: '按住空格键拖拽、抓手工具拖拽或双指触控平移；Ctrl + 滚轮缩放', icon: Move },
         { action: '锚点拖拽快速连线 (快捷键 C)', method: '悬停卡片四周蓝色锚点拖拽至目标卡片，或使用连线工具连续点击两张卡片', icon: ArrowRight },
         { action: '阵营分组框拖拽与缩放 (F)', method: '点击阵营框标题栏可自由拖拽（可同步带动框内卡片），拖拽右下角调整尺寸', icon: Frame },
         { action: '名片照片拖拽 OCR 建档', method: '直接将电脑中的名片图片拖入画布任意位置，自动触发 OCR 识别建档', icon: Image },
-        { action: '全选 / 复制 / 删除快捷键', method: 'Ctrl+A 全选画布，Ctrl+D 复制选中卡片，Delete / Backspace 批量移出画布', icon: BoxSelect },
-        { action: '自由画笔与荧光马克笔 (P / G)', method: '支持贝塞尔平滑曲线、多色盘、粗细调节及开启一笔成型自动识别圆框/矩形/战术箭头', icon: Tag },
-        { action: '演示激光笔与作战便签 (Z / S)', method: '按 Z 汇报高亮指示（松手自动消隐）；按 S 点击画布添加带状态印章的作战便签贴纸', icon: Layers },
-        { action: '自由套索智能圈选与成组 (L)', method: '套索支持“圈选要素”与“手绘圈选直接生成阵营分组框”双模式；按 E 启用矢量橡皮擦', icon: Lasso },
       ];
     }
     return [
-      { action: 'Pointer & Box Selection (Key V)', method: 'Click node to select, drag on empty canvas to create marquee selection', icon: MousePointer },
+      { action: 'Select & Box Selection (Default Key: Space)', method: 'Press Spacebar to switch to Select & Box mode; click node to select or drag on empty canvas to marquee select', icon: MousePointer },
+      { action: 'Pan & Zoom Canvas (Key H)', method: 'Press H for Hand Pan tool or use trackpad; Ctrl + wheel to zoom in/out', icon: Move },
       { action: 'Marquee & Freehand Lasso (M / L)', method: 'Box or freehand lasso selection with batch move, align, color and pack into frame', icon: BoxSelect },
-      { action: 'Freehand Lasso Tool (Key L)', method: 'Hold left click and draw any polygon loop to batch select enclosed cards and frames', icon: Lasso },
-      { action: 'Comprehensive Context Menu (Right Click)', method: 'Right click on cards, lines, frames, or empty canvas for contextual actions', icon: Tag },
-      { action: 'Layer Manager & Z-Index Ordering', method: 'Open Layer Manager panel or right click to bring to front, up, down, or send to back', icon: Layers },
+      { action: 'Freehand Lasso & Knife (Key L)', method: 'Select nodes, auto-generate group frames, or hold Alt to slice relationship lines', icon: Lasso },
+      { action: 'Freehand Pen & Arrow Modes (Key P)', method: 'Full color palette, No-Arrow / Single-Arrow / Double-Arrow options, and Smart Shape snapping', icon: Tag },
+      { action: 'Highlighter & Red Dot Laser (G / Z)', method: 'Color palette highlighter; Laser pointer features a glowing red dot cursor and smooth comet trail', icon: Layers },
+      { action: 'Custom Sticky Note & Eraser (N / E)', method: 'Customize stamp badge text, accent color, and note background color; press E for vector eraser', icon: Layers },
+      { action: 'Comprehensive Context Menu (Right Click)', method: 'Right click on cards, lines, frames, annotations, or empty canvas for contextual actions', icon: Tag },
       { action: 'Draggable Floating Menu Bar', method: 'Drag the grip handle to reposition anywhere; toggle between vertical & horizontal dock', icon: Move },
-      { action: 'Canvas Pan & Zoom (Key H / Space)', method: 'Hold Space to pan, use Hand tool or trackpad; Ctrl + wheel to zoom in/out', icon: Move },
       { action: 'Anchor Drag Connection (Key C)', method: 'Hover card glowing blue anchors to drag connections, or click connect tool', icon: ArrowRight },
       { action: 'Group Frames (Key F)', method: 'Drag group frame headers to move (along with cards), drag bottom-right corner to resize', icon: Frame },
       { action: 'Business Card OCR Drop', method: 'Drop card images directly onto canvas to auto-extract stakeholder contact details', icon: Image },
-      { action: 'Select All / Copy / Delete', method: 'Ctrl+A select all, Ctrl+D duplicate selected, Delete/Backspace remove from canvas', icon: BoxSelect },
-      { action: 'Freehand Pen & Highlighter (P / G)', method: 'Smooth Bezier ink, tactical colors, stroke widths, and Smart Shape recognition (circle/rect/arrow)', icon: Tag },
-      { action: 'Laser Pointer & Sticky Note (Z / S)', method: 'Press Z for auto-fading presentation laser trail; press S to place tactical sticky notes', icon: Layers },
-      { action: 'Lasso Auto-Frame & Eraser (L / E)', method: 'Switch Lasso to Auto-Frame mode to create group frames directly; press E for vector eraser', icon: Lasso },
     ];
   }, [language]);
 
