@@ -20,11 +20,13 @@ import {
   INITIAL_GROUP_FRAMES,
   INITIAL_VISIT_RECORDS,
   INITIAL_PROJECTS,
+  INITIAL_ANNOTATIONS,
+  INITIAL_CAMERA_BOOKMARKS,
   PROJECT_INITIAL_DATA,
 } from './sample-data.ts';
 
-const STORAGE_KEY_PROJECTS = 'dc_crm_projects_v5';
-const STORAGE_KEY_ACTIVE_PROJECT = 'dc_crm_active_project_v5';
+const STORAGE_KEY_PROJECTS = 'dc_crm_projects_v7';
+const STORAGE_KEY_ACTIVE_PROJECT = 'dc_crm_active_project_v7';
 const STORAGE_KEY_SIDEBAR = 'dc_crm_sidebar_collapsed_v5';
 
 // SQLite 远程后端异步持久化
@@ -52,7 +54,7 @@ export function syncToSqlite(key: string, value: any): void {
 }
 
 /**
- * 启动时从 SQLite 数据库拉取数据并补齐/同步到本地
+ * 启动时从 SQLite 数据库拉取数据并补齐/同步到本地 (仅同步 v7 及当前版本键)
  */
 export async function syncFromSqlite(): Promise<boolean> {
   try {
@@ -60,12 +62,14 @@ export async function syncFromSqlite(): Promise<boolean> {
     if (!res.ok) return false;
     const body = await res.json();
     if (body.success && body.data) {
-      const keys = Object.keys(body.data);
-      if (keys.length > 0) {
+      const hasV7Data = Object.keys(body.data).some((k) => k.includes('_v7'));
+      if (hasV7Data) {
         for (const [k, v] of Object.entries(body.data)) {
-          try {
-            localStorage.setItem(k, JSON.stringify(v));
-          } catch {}
+          if (k.includes('_v7') || k.includes('_v6') || k.includes('_v5')) {
+            try {
+              localStorage.setItem(k, JSON.stringify(v));
+            } catch {}
+          }
         }
         return true;
       }
@@ -103,7 +107,10 @@ export function saveProjects(projects: ProjectMap[]): void {
 export function getActiveProjectId(): string {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_ACTIVE_PROJECT);
-    if (raw) return raw;
+    if (raw) {
+      // Remove extra quotes if JSON.stringify was used
+      return raw.replace(/^"|"$/g, '');
+    }
   } catch {}
   return 'proj-huayun';
 }
@@ -116,7 +123,7 @@ export function setActiveProjectId(id: string): void {
 
 export function loadSavedPeople(projectId: string = 'proj-huayun'): Person[] {
   try {
-    const raw = localStorage.getItem(`dc_crm_people_v6_${projectId}`);
+    const raw = localStorage.getItem(`dc_crm_people_v7_${projectId}`);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -131,7 +138,7 @@ export function loadSavedPeople(projectId: string = 'proj-huayun'): Person[] {
 
 export function savePeople(people: Person[], projectId: string = 'proj-huayun'): void {
   try {
-    const key = `dc_crm_people_v6_${projectId}`;
+    const key = `dc_crm_people_v7_${projectId}`;
     localStorage.setItem(key, JSON.stringify(people));
     syncToSqlite(key, people);
   } catch (err) {
@@ -142,7 +149,7 @@ export function savePeople(people: Person[], projectId: string = 'proj-huayun'):
 export function loadSavedRelationships(projectId: string = 'proj-huayun'): Relationship[] {
   const defaultRels = PROJECT_INITIAL_DATA[projectId]?.relationships || INITIAL_RELATIONSHIPS;
   try {
-    const raw = localStorage.getItem(`dc_crm_relationships_v6_${projectId}`);
+    const raw = localStorage.getItem(`dc_crm_relationships_v7_${projectId}`);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -172,7 +179,7 @@ export function saveRelationships(
   projectId: string = 'proj-huayun'
 ): void {
   try {
-    const key = `dc_crm_relationships_v6_${projectId}`;
+    const key = `dc_crm_relationships_v7_${projectId}`;
     localStorage.setItem(key, JSON.stringify(relationships));
     syncToSqlite(key, relationships);
   } catch (err) {
@@ -182,7 +189,7 @@ export function saveRelationships(
 
 export function loadSavedGroupFrames(projectId: string = 'proj-huayun'): GroupFrame[] {
   try {
-    const raw = localStorage.getItem(`dc_crm_frames_v6_${projectId}`);
+    const raw = localStorage.getItem(`dc_crm_frames_v7_${projectId}`);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -197,7 +204,7 @@ export function loadSavedGroupFrames(projectId: string = 'proj-huayun'): GroupFr
 
 export function saveGroupFrames(frames: GroupFrame[], projectId: string = 'proj-huayun'): void {
   try {
-    const key = `dc_crm_frames_v6_${projectId}`;
+    const key = `dc_crm_frames_v7_${projectId}`;
     localStorage.setItem(key, JSON.stringify(frames));
     syncToSqlite(key, frames);
   } catch (err) {
@@ -207,7 +214,7 @@ export function saveGroupFrames(frames: GroupFrame[], projectId: string = 'proj-
 
 export function loadSavedAnnotations(projectId: string = 'proj-huayun'): CanvasAnnotation[] {
   try {
-    const raw = localStorage.getItem(`dc_crm_annotations_v6_${projectId}`);
+    const raw = localStorage.getItem(`dc_crm_annotations_v7_${projectId}`);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -217,7 +224,7 @@ export function loadSavedAnnotations(projectId: string = 'proj-huayun'): CanvasA
   } catch (err) {
     console.warn('Failed to parse saved annotations:', err);
   }
-  return [];
+  return PROJECT_INITIAL_DATA[projectId]?.annotations ?? INITIAL_ANNOTATIONS;
 }
 
 export function saveAnnotations(
@@ -225,7 +232,7 @@ export function saveAnnotations(
   projectId: string = 'proj-huayun'
 ): void {
   try {
-    const key = `dc_crm_annotations_v6_${projectId}`;
+    const key = `dc_crm_annotations_v7_${projectId}`;
     localStorage.setItem(key, JSON.stringify(annotations));
     syncToSqlite(key, annotations);
   } catch (err) {
@@ -235,7 +242,7 @@ export function saveAnnotations(
 
 export function loadSavedVisitRecords(projectId: string = 'proj-huayun'): VisitRecord[] {
   try {
-    const raw = localStorage.getItem(`dc_crm_visits_v5_${projectId}`);
+    const raw = localStorage.getItem(`dc_crm_visits_v7_${projectId}`);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -250,7 +257,7 @@ export function loadSavedVisitRecords(projectId: string = 'proj-huayun'): VisitR
 
 export function saveVisitRecords(records: VisitRecord[], projectId: string = 'proj-huayun'): void {
   try {
-    const key = `dc_crm_visits_v5_${projectId}`;
+    const key = `dc_crm_visits_v7_${projectId}`;
     localStorage.setItem(key, JSON.stringify(records));
     syncToSqlite(key, records);
   } catch (err) {
@@ -374,24 +381,46 @@ export function saveToolbarPosition(pos: ToolbarPosition): void {
 /**
  * 构建默认基线历史快照（方便用户开箱即用体验「时间轴与版本快照增量对比」）
  */
-function buildDefaultBaselineSnapshots(projectId: string): ProjectSnapshot[] {
-  const basePeople = loadSavedPeople(projectId);
-  const baseRels = loadSavedRelationships(projectId);
-  const baseFrames = loadSavedGroupFrames(projectId);
+export function buildDefaultBaselineSnapshots(projectId: string): ProjectSnapshot[] {
+  const basePeople = PROJECT_INITIAL_DATA[projectId]?.people || loadSavedPeople(projectId);
+  const baseRels = PROJECT_INITIAL_DATA[projectId]?.relationships || loadSavedRelationships(projectId);
+  const baseFrames = PROJECT_INITIAL_DATA[projectId]?.frames || loadSavedGroupFrames(projectId);
   if (basePeople.length < 2) return [];
 
-  // 模拟 30 天前「一阶段立项摸底期」的历史状态：
-  // 1) 部分当前铁杆/温和支持者在立项初期尚处于接触摸底或中立状态
-  // 2) 移除最后 1 名后期新增的外部顾问或干系人，以及最后 1~2 条后期突破连线
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+
+  // 快照 2 (14天前)：二阶段「设计院落图与POC样机测试前夕」
+  // 当时友商B (p-he) 与机电分包商 (p-sub-epc) 尚未入局，咨询公司罗婉清尚在接触摸底 (exploring)，客户周浩然尚在温和支持 (warm)
+  const midExcludedIds = new Set(['p-he', 'p-sub-epc']);
+  const midPeople: Person[] = basePeople
+    .filter((p) => !midExcludedIds.has(p.id))
+    .map((p) => {
+      if (p.id === 'p-luo') return { ...p, relationshipStage: 'exploring' };
+      if (p.id === 'p-zhou') return { ...p, relationshipStage: 'warm' };
+      if (p.id === 'p-lin') return { ...p, relationshipStage: 'cold' };
+      return { ...p };
+    });
+  const midPersonIdSet = new Set(midPeople.map((p) => p.id));
+  const midRels: Relationship[] = baseRels.filter(
+    (r) => midPersonIdSet.has(r.sourceId) && midPersonIdSet.has(r.targetId)
+  );
+
+  // 快照 1 (30天前)：一阶段「立项可研初期摸底基线」
+  // 初期仅摸排出客户核心层与设计院，我方分包商 (p-sub-cdu, p-sub-epc)、咨询公司 (p-luo) 及友商B (p-he) 均未建档，且客户高层尚处于接触摸底或温和阶段
+  const earlyExcludedIds = new Set(['p-sub-cdu', 'p-sub-epc', 'p-luo', 'p-he']);
   const earlyPeople: Person[] = basePeople
-    .slice(0, Math.max(2, basePeople.length - 1))
+    .filter((p) => !earlyExcludedIds.has(p.id))
+    .slice(0, Math.max(2, basePeople.length - 2))
     .map((p, idx) => {
       let earlyStage = p.relationshipStage;
-      if (p.relationshipStage === 'hot' && !p.tags?.includes('我方')) {
+      if (p.tags?.includes('我方团队')) {
+        earlyStage = 'hot';
+      } else if (p.relationshipStage === 'hot') {
         earlyStage = 'warm';
-      } else if (p.relationshipStage === 'warm' && idx % 2 === 0) {
+      } else if (p.relationshipStage === 'warm') {
         earlyStage = 'exploring';
-      } else if (p.relationshipStage === 'exploring' && idx % 2 === 1) {
+      } else if (p.relationshipStage === 'exploring' && idx % 2 === 0) {
         earlyStage = 'cold';
       }
       return {
@@ -403,20 +432,31 @@ function buildDefaultBaselineSnapshots(projectId: string): ProjectSnapshot[] {
   const earlyPersonIdSet = new Set(earlyPeople.map((p) => p.id));
   const earlyRels: Relationship[] = baseRels
     .filter((r) => earlyPersonIdSet.has(r.sourceId) && earlyPersonIdSet.has(r.targetId))
-    .slice(0, Math.max(1, baseRels.length - 1));
-
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    .slice(0, Math.max(1, baseRels.length - 4));
 
   return [
     {
+      id: `snap-stage2-${projectId}`,
+      projectId,
+      title: '二阶段：设计院落图与POC测试前夕',
+      createdAt: `${fourteenDaysAgo} 16:30`,
+      note: '邮电设计院完成可研落图，华擎液冷分包进场准备 40kW 样机 POC；尚未锁定中建数科机电分包，友商B尚未介入参数阻击',
+      people: midPeople,
+      relationships: midRels,
+      frames: baseFrames.filter((f) => f.id !== 'frame-subcontractors'),
+      annotations: [],
+    },
+    {
       id: `snap-init-${projectId}`,
       projectId,
-      title: '一阶段立项前摸底基线',
+      title: '一阶段：可研立项初期摸底基线',
       createdAt: `${thirtyDaysAgo} 10:00`,
-      note: '项目立项初期初次摸排的干系人态度与汇报链基线存档',
+      note: '项目立项初期初次摸排的客户决策链与设计院基线存档（尚未引入我方分包商联合体与赛迪全过程咨询）',
       people: earlyPeople,
       relationships: earlyRels,
-      frames: baseFrames,
+      frames: baseFrames.filter(
+        (f) => f.id !== 'frame-subcontractors' && f.id !== 'frame-competitors-alert'
+      ),
       annotations: [],
     },
   ];
@@ -424,7 +464,7 @@ function buildDefaultBaselineSnapshots(projectId: string): ProjectSnapshot[] {
 
 export function loadProjectSnapshots(projectId: string = 'proj-huayun'): ProjectSnapshot[] {
   try {
-    const raw = localStorage.getItem(`dc_crm_snapshots_v1_${projectId}`);
+    const raw = localStorage.getItem(`dc_crm_snapshots_v7_${projectId}`);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -442,7 +482,7 @@ export function saveProjectSnapshots(
   projectId: string = 'proj-huayun'
 ): void {
   try {
-    const key = `dc_crm_snapshots_v1_${projectId}`;
+    const key = `dc_crm_snapshots_v7_${projectId}`;
     localStorage.setItem(key, JSON.stringify(snapshots));
     syncToSqlite(key, snapshots);
   } catch (err) {
@@ -452,13 +492,13 @@ export function saveProjectSnapshots(
 
 export function loadCameraBookmarks(projectId: string = 'proj-huayun'): CameraBookmark[] {
   try {
-    const raw = localStorage.getItem(`dc_crm_camera_bookmarks_v1_${projectId}`);
+    const raw = localStorage.getItem(`dc_crm_camera_bookmarks_v7_${projectId}`);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
     }
   } catch {}
-  return [];
+  return PROJECT_INITIAL_DATA[projectId]?.cameraBookmarks || INITIAL_CAMERA_BOOKMARKS;
 }
 
 export function saveCameraBookmarks(
@@ -466,7 +506,7 @@ export function saveCameraBookmarks(
   projectId: string = 'proj-huayun'
 ): void {
   try {
-    const key = `dc_crm_camera_bookmarks_v1_${projectId}`;
+    const key = `dc_crm_camera_bookmarks_v7_${projectId}`;
     localStorage.setItem(key, JSON.stringify(bookmarks));
     syncToSqlite(key, bookmarks);
   } catch {}

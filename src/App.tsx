@@ -36,6 +36,7 @@ import {
   saveProjectSnapshots,
   loadCameraBookmarks,
   saveCameraBookmarks,
+  buildDefaultBaselineSnapshots,
   syncFromSqlite,
 } from './utils/storage.ts';
 import {
@@ -43,6 +44,8 @@ import {
   INITIAL_RELATIONSHIPS,
   INITIAL_GROUP_FRAMES,
   INITIAL_VISIT_RECORDS,
+  INITIAL_ANNOTATIONS,
+  INITIAL_CAMERA_BOOKMARKS,
   PROJECT_INITIAL_DATA,
 } from './utils/sample-data.ts';
 import {
@@ -282,6 +285,8 @@ export default function App() {
         setGroupFrames(loadSavedGroupFrames(activeProjectId));
         setVisits(loadSavedVisitRecords(activeProjectId));
         setAnnotations(loadSavedAnnotations(activeProjectId));
+        setProjectSnapshots(loadProjectSnapshots(activeProjectId));
+        setCameraBookmarks(loadCameraBookmarks(activeProjectId));
         setStylePrefs(loadSavedStylePreferences());
       }
     });
@@ -1358,14 +1363,20 @@ export default function App() {
       setRelationships(preset.relationships);
       setGroupFrames(preset.frames);
       setVisits(preset.visits);
+      setAnnotations(preset.annotations ?? []);
+      setCameraBookmarks(preset.cameraBookmarks ?? []);
     } else {
       setPeople(INITIAL_PEOPLE);
       setRelationships(INITIAL_RELATIONSHIPS);
       setGroupFrames(INITIAL_GROUP_FRAMES);
       setVisits(INITIAL_VISIT_RECORDS);
+      setAnnotations(INITIAL_ANNOTATIONS);
+      setCameraBookmarks(INITIAL_CAMERA_BOOKMARKS);
     }
+    setProjectSnapshots(buildDefaultBaselineSnapshots(activeProjectId));
+    setActiveSnapshotDiffId(null);
     setFitViewTrigger((prev) => prev + 1);
-    showToast('已重置当前算力项目示例数据');
+    showToast('已重置当前算力项目全要素示例数据');
   };
 
   // Export & Import JSON / CSV

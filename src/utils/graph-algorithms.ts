@@ -119,7 +119,7 @@ export function findInfluencePath(
   return path;
 }
 
-type FactionCategory = 'our_team' | 'owner' | 'partner' | 'competitor';
+type FactionCategory = 'our_team' | 'subcontractor' | 'owner' | 'partner' | 'competitor';
 type OwnerSubTrack = 'exec' | 'tech' | 'comm';
 
 interface ClassifiedPerson {
@@ -132,7 +132,7 @@ interface ClassifiedPerson {
 
 /**
  * Classify each stakeholder into an exact Faction, Functional Track, and Hierarchy Tier
- * with strict priority rules so Design Institute or Competitor GMs never mix with Owner VPs.
+ * with strict priority rules so Subcontractors, Design Institutes/Consultants, or Competitors never mix with Owner VPs.
  */
 function classifyStakeholder(p: BasePerson): ClassifiedPerson {
   const tags = (p.tags || []).join(' ');
@@ -140,9 +140,28 @@ function classifyStakeholder(p: BasePerson): ClassifiedPerson {
   const title = p.title || '';
   const bio = p.bio || '';
   const specialty = p.specialty || '';
-  const fullText = `${tags} ${company} ${title} ${bio} ${specialty}`;
 
-  // 1. Check Our Team first (highest specificity)
+  // 1. Check Our Subcontractor / Delivery Alliance first (before our_team since tags may contain "我方分包商")
+  const isSubcontractor =
+    tags.includes('分包') ||
+    company.includes('分包') ||
+    title.includes('分包') ||
+    tags.includes('施工分包') ||
+    tags.includes('液冷分包');
+
+  if (isSubcontractor) {
+    const isFluidOrTech =
+      specialty.includes('液冷') || title.includes('液冷') || company.includes('流体');
+    return {
+      person: p,
+      faction: 'subcontractor',
+      ownerTrack: isFluidOrTech ? 'tech' : 'comm',
+      hierarchyTier: 3,
+      sortWeight: isFluidOrTech ? 32 : 38,
+    };
+  }
+
+  // 2. Check Our Team (highest specificity for internal account team)
   const isOurTeam =
     tags.includes('我方') ||
     company.includes('我方') ||
@@ -169,7 +188,7 @@ function classifyStakeholder(p: BasePerson): ClassifiedPerson {
     };
   }
 
-  // 2. Check Competitor / Blocker
+  // 3. Check Competitor / Blocker
   const isCompetitor =
     p.relationshipStage === 'blocked' ||
     tags.includes('竞争') ||
@@ -179,45 +198,45 @@ function classifyStakeholder(p: BasePerson): ClassifiedPerson {
     bio.includes('竞争对手');
 
   if (isCompetitor) {
+    const isCommercialRival =
+      specialty.includes('招采') || title.includes('大客户') || tags.includes('低价');
     return {
       person: p,
       faction: 'competitor',
       ownerTrack: 'comm',
       hierarchyTier: 3,
-      sortWeight: 90,
+      sortWeight: isCommercialRival ? 85 : 92,
     };
   }
 
-  // 3. Check External Ecosystem Partner (Design Institute / EPC / Consultant)
+  // 4. Check External Ecosystem Partner (Design Institute & Consulting Firm / EPC Advisor)
   const isPartner =
     tags.includes('设计院') ||
+    tags.includes('咨询') ||
+    tags.includes('顾问') ||
     tags.includes('总包') ||
     tags.includes('EPC') ||
     tags.includes('盟友') ||
     tags.includes('引荐') ||
     company.includes('设计院') ||
-    company.includes('总包') ||
+    company.includes('咨询') ||
     company.includes('规划') ||
     specialty.includes('设计') ||
     specialty.includes('EPC');
 
   if (isPartner) {
-    const isSeniorAdvisor =
-      title.includes('总工') ||
-      title.includes('院长') ||
-      title.includes('总监') ||
-      tags.includes('高层引荐') ||
-      tags.includes('设计院');
+    const isDesignInstitute =
+      tags.includes('设计院') || company.includes('设计院') || title.includes('总工');
     return {
       person: p,
       faction: 'partner',
-      ownerTrack: isSeniorAdvisor ? 'tech' : 'comm',
-      hierarchyTier: isSeniorAdvisor ? 2 : 3,
-      sortWeight: isSeniorAdvisor ? 15 : 65,
+      ownerTrack: isDesignInstitute ? 'tech' : 'comm',
+      hierarchyTier: 2,
+      sortWeight: isDesignInstitute ? 12 : 18,
     };
   }
 
-  // 4. Owner / Client Side Stakeholder
+  // 5. Owner / Client Side Stakeholder
   const isCommercial =
     tags.includes('商务') ||
     tags.includes('招采') ||
@@ -454,8 +473,22 @@ export function optimizeRelationshipsForLayout(
     if (mode === 'faction') {
       if (absDx < 65) {
         // Same vertical column
-        sourceAnchor = dy >= 0 ? 'bottom' : 'top';
-        targetAnchor = dy >= 0 ? 'top' : 'bottom';
+        const minY = Math.min(scy, tcy);
+        const maxY = Math.max(scy, tcy);
+        const hasCardBetweenV = positions.some((other) => {
+          if (other.id === rel.sourceId || other.id === rel.targetId) return false;
+          const ocx = other.x + CARD_WIDTH / 2;
+          const ocy = other.y + CARD_HEIGHT / 2;
+          return Math.abs(ocx - scx) < 65 && ocy > minY + 20 && ocy < maxY - 20;
+        });
+        if (hasCardBetweenV) {
+          sourceAnchor = 'left';
+          targetAnchor = 'left';
+          preferredOffsetX = -56;
+        } else {
+          sourceAnchor = dy >= 0 ? 'bottom' : 'top';
+          targetAnchor = dy >= 0 ? 'top' : 'bottom';
+        }
       } else if (absDx < 240 && absDy > 140) {
         // Diagonal inside Owner Pyramid (e.g. Top Executive down-left to Tech or down-right to Comm)
         sourceAnchor = dy >= 0 ? 'bottom' : 'top';
@@ -620,7 +653,7 @@ export function optimizeRelationshipsForLayout(
 }
 
 /**
- * Full AAAAA-Grade Faction / Ecosystem Swimlane Auto-Layout (阵营分栏自动排版)
+ * Full AAAAA-Grade 5-Camp Faction / Ecosystem Swimlane Auto-Layout (阵营分栏自动排版)
  * Synchronizes People Positions + Dynamic Swimlane GroupFrames + Smart Non-Overlapping Connectors
  */
 export function calculateFactionLayoutFull(
@@ -633,6 +666,11 @@ export function calculateFactionLayoutFull(
 
   const ourTeam = classified
     .filter((c) => c.faction === 'our_team')
+    .sort((a, b) => a.sortWeight - b.sortWeight)
+    .map((c) => c.person);
+
+  const subcontractors = classified
+    .filter((c) => c.faction === 'subcontractor')
     .sort((a, b) => a.sortWeight - b.sortWeight)
     .map((c) => c.person);
 
@@ -663,16 +701,17 @@ export function calculateFactionLayoutFull(
   // Layout Spacing Constants (Generous AAAAA-grade breathing room)
   const START_Y = 140;
   const ROW_STEP = 256; // 148px card height + 108px vertical gap for labels & arrows
-  const CORRIDOR_GAP = 248; // Wide 248px horizontal avenue between swimlane columns
+  const CORRIDOR_GAP = 268; // Wide 268px horizontal avenue between swimlane columns
   const OWNER_INNER_COL_GAP = 132; // 132px horizontal gap between Tech col and Comm col
 
   const peoplePositions: GraphNodePosition[] = [];
   const ourPositions: { x: number; y: number }[] = [];
+  const subPositions: { x: number; y: number }[] = [];
   const ownerPositions: { x: number; y: number }[] = [];
   const partnerPositions: { x: number; y: number }[] = [];
   const competitorPositions: { x: number; y: number }[] = [];
 
-  // Calculate Owner Decision Chain dimensions first so other columns can align harmoniously
+  // Calculate Owner Decision Chain dimensions first
   const hasTwoOwnerTracks = ownerTech.length > 0 && ownerComm.length > 0;
   const ownerTrackRows = hasTwoOwnerTracks
     ? Math.max(ownerTech.length, ownerComm.length)
@@ -680,13 +719,14 @@ export function calculateFactionLayoutFull(
   const ownerExecRows = Math.ceil(ownerExecs.length / 2);
   const totalOwnerRows = Math.max(1, ownerExecRows + ownerTrackRows);
 
-  // 1. Swimlane 1: Our Account Team (Left Column)
+  // 1. Left Column: Swimlane 1A (Our Account Team) & Swimlane 1B (Our Subcontractors)
   const ourX = 80;
-  const ourTotalHeight = Math.max(0, (ourTeam.length - 1) * ROW_STEP);
-  const ownerTotalHeight = Math.max(0, (totalOwnerRows - 1) * ROW_STEP);
   const ourStartY =
-    ourTeam.length < totalOwnerRows
-      ? Math.round(START_Y + Math.max(0, (ownerTotalHeight - ourTotalHeight) * 0.25))
+    subcontractors.length === 0 && ourTeam.length < totalOwnerRows
+      ? Math.round(
+          START_Y +
+            Math.max(0, ((totalOwnerRows - 1) * ROW_STEP - Math.max(0, (ourTeam.length - 1) * ROW_STEP)) * 0.25)
+        )
       : START_Y;
 
   ourTeam.forEach((p, idx) => {
@@ -695,8 +735,18 @@ export function calculateFactionLayoutFull(
     ourPositions.push({ x: pos.x, y: pos.y });
   });
 
-  // 2. Swimlane 2: Owner Core Decision Chain (Center Pyramid-Matrix)
-  const ownerColLeftX = ourTeam.length > 0 ? ourX + CARD_WIDTH + CORRIDOR_GAP : 320;
+  const subStartY =
+    ourTeam.length > 0 ? ourStartY + ourTeam.length * ROW_STEP + 72 : START_Y;
+
+  subcontractors.forEach((p, idx) => {
+    const pos = { id: p.id, x: ourX, y: subStartY + idx * ROW_STEP };
+    peoplePositions.push(pos);
+    subPositions.push({ x: pos.x, y: pos.y });
+  });
+
+  // 2. Center Column: Swimlane 2 (Client / Owner Core Decision Chain Pyramid-Matrix)
+  const hasLeftColumn = ourTeam.length > 0 || subcontractors.length > 0;
+  const ownerColLeftX = hasLeftColumn ? ourX + CARD_WIDTH + CORRIDOR_GAP : 320;
   const ownerColRightX = ownerColLeftX + CARD_WIDTH + OWNER_INNER_COL_GAP;
 
   let currentOwnerY = START_Y;
@@ -745,7 +795,7 @@ export function calculateFactionLayoutFull(
     });
   }
 
-  // 3. Swimlane 3 & 4: External Partners (Top-Right) & Competitors (Bottom-Right)
+  // 3. Right Column: Swimlane 3 (Design Institute & Consulting Firm) & Swimlane 4 (Competitors)
   const ownerRightEdge = hasTwoOwnerTracks
     ? ownerColRightX + CARD_WIDTH
     : ownerColLeftX + CARD_WIDTH;
@@ -776,7 +826,7 @@ export function calculateFactionLayoutFull(
 
   const ourFrame = buildFrameForPositions(
     'frame-our-team',
-    '我方铁三角作战组',
+    '我方铁三角作战指挥部',
     'AR 客户总监 · SR 首席架构 · FR 商务交付',
     '#3B82F6',
     10,
@@ -784,13 +834,23 @@ export function calculateFactionLayoutFull(
   );
   if (ourFrame) groupFrames.push(ourFrame);
 
+  const subFrame = buildFrameForPositions(
+    'frame-subcontractors',
+    '我方核心分包商与交付联合体',
+    '液冷环网定制 · 机电总包施工 · 背靠背锁价结盟',
+    '#10B981',
+    11,
+    subPositions
+  );
+  if (subFrame) groupFrames.push(subFrame);
+
   const ownerTitle = projectCompanyName
-    ? `业主方核心决策链 (${projectCompanyName})`
-    : '业主方核心决策链';
+    ? `客户核心决策链 (${projectCompanyName})`
+    : '客户核心决策链';
   const ownerFrame = buildFrameForPositions(
     'frame-decision-chain',
     ownerTitle,
-    '高层投资拍板 · 技术总工把关 · 商务招采评标',
+    '高层投资拍板 · 技术总工定标 · 战略招采评标 · 工程与运维验收',
     '#8B5CF6',
     12,
     ownerPositions
@@ -798,10 +858,10 @@ export function calculateFactionLayoutFull(
   if (ownerFrame) groupFrames.push(ownerFrame);
 
   const partnerFrame = buildFrameForPositions(
-    'frame-partners-ecosystem',
-    '外部生态与设计院盟友',
-    '规划可研 · 图审顾问 · EPC 总包协同',
-    '#06B6D4',
+    'frame-design-consult',
+    '设计院 & 全过程工程咨询顾问',
+    '可研与招标技术规范主笔 · BOQ 清单控制价与 TCO 审计',
+    '#F97316',
     14,
     partnerPositions
   );
@@ -809,8 +869,8 @@ export function calculateFactionLayoutFull(
 
   const compFrame = buildFrameForPositions(
     'frame-competitors-alert',
-    '竞争对手与控标预警',
-    '友商公关态势 · 低价冲标防御',
+    '友商竞争与控标阻击阵营',
+    '商务超低价冲标 · 策反分包商 · 排他技术参数渗透',
     '#EF4444',
     15,
     competitorPositions
@@ -864,16 +924,17 @@ export function calculateHierarchyLayoutFull(
     })
     .map((c) => c.person);
 
-  // Tier 3: Execution Managers, EPC Partners & Competitors
-  // Order: Technical Execution (Left) -> EPC Partner (Center-Right) -> Competitor (Far Right)
+  // Tier 3: Subcontractors, Execution Managers & Competitors
+  // Order: Our Subcontractors (Left) -> Client Technical Execution (Center-Left) -> Client Comm/Partner (Center-Right) -> Competitor (Far Right)
   const tier3 = classified
     .filter((c) => c.hierarchyTier === 3)
     .sort((a, b) => {
       const rank = (c: ClassifiedPerson) => {
-        if (c.faction === 'owner' && c.ownerTrack === 'tech') return 10 + (100 - c.sortWeight);
-        if (c.faction === 'owner' && c.ownerTrack === 'comm') return 25;
-        if (c.faction === 'partner') return 40;
-        return 60; // Competitor on far right
+        if (c.faction === 'subcontractor') return 5 + c.sortWeight * 0.1;
+        if (c.faction === 'owner' && c.ownerTrack === 'tech') return 20 + (100 - c.sortWeight) * 0.1;
+        if (c.faction === 'owner' && c.ownerTrack === 'comm') return 35;
+        if (c.faction === 'partner') return 45;
+        return 60 + c.sortWeight * 0.1; // Competitor on far right
       };
       return rank(a) - rank(b);
     })
@@ -894,10 +955,10 @@ export function calculateHierarchyLayoutFull(
     })
     .map((c) => c.person);
 
-  const CENTER_X = 780;
+  const CENTER_X = 860;
   const START_Y = 120;
   const TIER_GAP_Y = 320; // 148px card + 172px open vertical corridor between tiers
-  const MAX_CARDS_PER_ROW = 5;
+  const MAX_CARDS_PER_ROW = 6;
 
   const tiers = [
     {
@@ -913,26 +974,26 @@ export function calculateHierarchyLayoutFull(
     },
     {
       id: 'frame-tier-2-gatekeepers',
-      title: 'L2 核心技术把关与商务评标专家层',
-      subtitle: '设计院规范主笔 · 总工技术定标 · 招采商务谈判',
+      title: 'L2 核心技术定标、设计院 & 全过程咨询把关层',
+      subtitle: '设计院规范主笔 · 咨询公司造价/TCO审计 · 总工技术定标 · 招采商务谈判',
       color: '#06B6D4',
       zIndex: 11,
       nodes: tier2,
-      hGap: 148,
+      hGap: 140,
     },
     {
       id: 'frame-tier-3-execution',
-      title: 'L3 工程执行、总包协同与外部博弈层',
-      subtitle: '机电暖通与运维执行 · EPC 总包施工 · 友商控标态势',
+      title: 'L3 我方分包商联合体、客户工程运维执行与友商博弈层',
+      subtitle: '液冷/机电核心分包商 · 客户工程与DCIM验收 · 友商低价冲标与参数排他',
       color: '#F59E0B',
       zIndex: 12,
       nodes: tier3,
-      hGap: 124,
+      hGap: 116,
     },
     {
       id: 'frame-tier-4-our-team',
-      title: 'L4 我方铁三角攻坚指挥部',
-      subtitle: 'SR 技术方案共创 · AR 高层公关突破 · FR 商务交付闭环',
+      title: 'L4 我方铁三角作战指挥部',
+      subtitle: 'SR 技术方案共创 · AR 高层公关操盘 · FR 分包统筹与商务闭环',
       color: '#3B82F6',
       zIndex: 13,
       nodes: tier4,

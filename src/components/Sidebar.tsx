@@ -46,12 +46,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const filterTabs = useMemo(() => [
     { key: 'all', label: t('sidebarFilterAll') },
     { key: 'onCanvas', label: t('sidebarFilterOnCanvas') },
-    { key: 'client', label: t('sidebarFilterClient'), match: language === 'zh' ? '业主方' : 'client' },
-    { key: 'team', label: t('sidebarFilterOurTeam'), match: language === 'zh' ? '我方' : 'team' },
-    { key: 'design', label: t('sidebarFilterDesign'), match: language === 'zh' ? '设计院' : 'design' },
-    { key: 'epc', label: t('sidebarFilterEpc'), match: language === 'zh' ? '总包' : 'epc' },
-    { key: 'competitor', label: t('sidebarFilterCompetitor'), match: language === 'zh' ? '竞争对手' : 'competitor' },
-  ], [t, language]);
+    { key: 'client', label: t('sidebarFilterClient'), matches: ['业主方', '客户', 'client'] },
+    { key: 'team', label: t('sidebarFilterOurTeam'), matches: ['我方团队', '铁三角', 'our team'] },
+    { key: 'epc', label: t('sidebarFilterEpc'), matches: ['分包', 'subcontractor'] },
+    { key: 'design', label: t('sidebarFilterDesign'), matches: ['设计院', '咨询', '顾问', 'design', 'consult'] },
+    { key: 'competitor', label: t('sidebarFilterCompetitor'), matches: ['竞争对手', '友商', 'competitor'] },
+  ], [t]);
 
   const filteredPeople = useMemo(() => {
     return people.filter((person) => {
@@ -71,14 +71,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
       if (activeTabKey === 'onCanvas') return person.onCanvas;
 
       const currentTab = filterTabs.find((ft) => ft.key === activeTabKey);
-      if (!currentTab || !currentTab.match) return true;
+      if (!currentTab || !currentTab.matches) return true;
 
-      const matchTerm = currentTab.match.toLowerCase();
-      return (
-        person.tags.some((tg) => tg.toLowerCase().includes(matchTerm)) ||
-        (person.company && person.company.toLowerCase().includes(matchTerm)) ||
-        (person.specialty && person.specialty.toLowerCase().includes(matchTerm))
-      );
+      // Prevent subcontractors from leaking into "Our Team" tab
+      const isSub =
+        person.tags.some((tg) => tg.includes('分包')) ||
+        (person.company && person.company.includes('分包'));
+      if (activeTabKey === 'team' && isSub) return false;
+
+      return currentTab.matches.some((m) => {
+        const matchTerm = m.toLowerCase();
+        return (
+          person.tags.some((tg) => tg.toLowerCase().includes(matchTerm)) ||
+          (person.company && person.company.toLowerCase().includes(matchTerm)) ||
+          (person.specialty && person.specialty.toLowerCase().includes(matchTerm))
+        );
+      });
     });
   }, [people, searchQuery, activeTabKey, filterTabs]);
 
